@@ -2082,7 +2082,14 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if exec == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
-	return exec.HttpRequest(ctx, auth, req)
+	release := m.activeRequests.begin(auth.ID)
+	response, err := exec.HttpRequest(ctx, auth, req)
+	if err != nil || response == nil || response.Body == nil {
+		release()
+		return response, err
+	}
+	response.Body = &activeRequestBody{ReadCloser: response.Body, release: release}
+	return response, nil
 }
 
 func ensureCanonicalSessionMetadata(metadata map[string]any, headers http.Header, payload []byte) map[string]any {

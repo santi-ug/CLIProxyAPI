@@ -1,6 +1,9 @@
 package auth
 
-import "sync"
+import (
+	"io"
+	"sync"
+)
 
 // activeRequestCounter counts upstream requests currently executing per credential.
 // The zero value is ready to use.
@@ -54,4 +57,22 @@ func (m *Manager) ActiveRequests(authID string) int {
 		return 0
 	}
 	return m.activeRequests.get(authID)
+}
+
+// activeRequestBody keeps raw HTTP calls active through body consumption or closure.
+type activeRequestBody struct {
+	io.ReadCloser
+	release func()
+}
+
+func (b *activeRequestBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.release()
+	}
+	return n, err
+}
+func (b *activeRequestBody) Close() error {
+	defer b.release()
+	return b.ReadCloser.Close()
 }

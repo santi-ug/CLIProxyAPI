@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -171,5 +173,40 @@ func TestManagerCountsActiveStreamUntilItEnds(t *testing.T) {
 	}
 	if got := m.ActiveRequests("bb-backup"); got != 0 {
 		t.Fatalf("finished stream: count = %d, want 0", got)
+	}
+}
+
+type activeHTTPExecutor struct{ activeRequestExecutor }
+
+func (e *activeHTTPExecutor) HttpRequest(_ context.Context, auth *Auth, _ *http.Request) (*http.Response, error) {
+	e.onCall(auth.ID)
+	return &http.Response{Body: io.NopCloser(strings.NewReader("response"))}, nil
+}
+func TestActiveHttpRequestBodyLifetime(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	e := &activeHTTPExecutor{}
+	e.onCall = func(id string) {
+		if m.ActiveRequests(id) != 1 {
+			t.Fatal("HTTP call not counted")
+		}
+	}
+	m.RegisterExecutor(e)
+	req, _ := http.NewRequest("GET", "http://localhost", nil)
+	response, err := m.HttpRequest(context.Background(), &Auth{ID: "raw", Provider: "codex"}, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ActiveRequests("raw") != 1 {
+		t.Fatal("released before body finished")
+	}
+	if _, err := io.ReadAll(response.Body); err != nil {
+		t.Fatal(err)
+	}
+	if m.ActiveRequests("raw") != 0 {
+		t.Fatal("not released at EOF")
+	}
+	_ = response.Body.Close()
+	if m.ActiveRequests("raw") != 0 {
+		t.Fatal("double release")
 	}
 }

@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
+	"time"
 )
 
 // diskSnapshot mimics what the file watcher hands to Update after a management PATCH
@@ -73,5 +75,34 @@ func TestUpdateWithNewCredentialsStillClearsUnauthorized(t *testing.T) {
 	current, _ := m.GetByID("relogin-auth")
 	if HasUnauthorizedAuthFailure(current) || current.Unavailable || current.Status != StatusActive {
 		t.Fatalf("new credentials should clear the unauthorized state, got status=%s unavailable=%t", current.Status, current.Unavailable)
+	}
+}
+
+func TestReloginClearsNonQuotaFailures(t *testing.T) {
+	for _, code := range []int{400, 401, 402, 403, 404} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			ctx := context.Background()
+			old := diskSnapshot("relogin", "old", nil)
+			old.Status = StatusError
+			old.Unavailable = true
+			old.NextRetryAfter = time.Now().Add(time.Hour)
+			old.LastError = &Error{HTTPStatus: code, Message: "old credential failed"}
+			old.ModelStates = map[string]*ModelState{"model": {Status: StatusError, Unavailable: true, NextRetryAfter: old.NextRetryAfter, LastError: old.LastError}}
+			if _, err := m.Register(ctx, old); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.Update(ctx, diskSnapshot("relogin", "new", nil)); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := m.GetByID("relogin")
+			if got.Unavailable || got.LastError != nil || !got.NextRetryAfter.IsZero() || got.Status != StatusActive {
+				t.Fatalf("credential retained failure: %+v", got)
+			}
+			state := got.ModelStates["model"]
+			if state != nil && (state.Unavailable || state.LastError != nil || !state.NextRetryAfter.IsZero()) {
+				t.Fatalf("model retained failure: %+v", state)
+			}
+		})
 	}
 }

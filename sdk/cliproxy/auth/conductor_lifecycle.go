@@ -231,14 +231,29 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		// no runtime state. Keep the live cooldown, quota and status so metadata-only edits do
 		// not make a cooling credential look healthy. Credential changes are handled below;
 		// refresh and prepare modes already merged the live state above.
-		if mode == updateModeReplace && !hasCredentialRuntimeState(auth) {
+		credChanged := CredentialsChanged(existing, auth)
+		if mode == updateModeReplace && !credChanged && !hasCredentialRuntimeState(auth) {
 			inheritCredentialRuntimeState(auth, existing)
 		}
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-			auth.ModelStates = existing.ModelStates
+			auth.ModelStates = existing.Clone().ModelStates
 		}
-		credChanged := CredentialsChanged(existing, auth)
 		if credChanged {
+			// Re-login replaces the credentials that caused non-quota failures. Keep quota
+			// cooldowns, but do not carry terminal or request errors into the new login.
+			if !auth.Quota.Exceeded {
+				auth.Unavailable = false
+				auth.NextRetryAfter = time.Time{}
+				auth.LastError = nil
+				auth.StatusMessage = ""
+				auth.Status = StatusActive
+			}
+			for _, state := range auth.ModelStates {
+				if state != nil && !state.Quota.Exceeded {
+					resetModelState(state, time.Now())
+					cooldownStateChanged = true
+				}
+			}
 			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
 				auth.Unavailable = false
 				auth.LastError = nil
