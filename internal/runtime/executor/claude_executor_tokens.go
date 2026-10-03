@@ -137,6 +137,9 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	}
 	incomingHeaders, claudeCodeDetection := detectIncomingClaudeCodeRequest(ctx, opts.Headers, originalPayload, true, e.cfg)
 	confirmedClaudeCode := claudeCodeDetection.Confirmed
+	if errRefused := cliproxyauth.RefuseUnverifiedClaudeSubscription(auth, confirmedClaudeCode); errRefused != nil {
+		return cliproxyexecutor.Response{}, errRefused
+	}
 	claudeSessionID := ""
 	if fp.ProfileClaudeCodeCLI {
 		claudeSessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, originalPayload, req.Payload, confirmedClaudeCode, opts.Metadata, req.Metadata)

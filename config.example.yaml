@@ -27,6 +27,12 @@ server:
   # Server port
   port: 8317
 
+  # When true, Claude subscription logins (OAuth and file credentials) only serve verified native
+  # Claude Code on the Anthropic Messages API (/v1/messages and count_tokens). Every other client or
+  # endpoint gets HTTP 403 instead of a disguised request, and model listings for those clients hide
+  # models that only Claude logins serve. Claude API keys keep serving everyone.
+  claude-code-only: false
+
   # IP addresses or CIDRs of proxies allowed to supply forwarded client IP headers.
   # An empty list (the default) does not trust forwarded headers. Restart after changing this setting.
   trusted-proxies: []

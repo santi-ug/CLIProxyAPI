@@ -22,6 +22,11 @@ type Config struct {
 	// The server applies this list at startup; changing it requires a restart.
 	TrustedProxies []string `yaml:"trusted-proxies" json:"trusted-proxies"`
 
+	// ClaudeCodeOnly limits Claude subscription logins (OAuth and file credentials) to verified
+	// native Claude Code on the Anthropic Messages API. Other clients get HTTP 403 instead of a
+	// cloaked request, and model listings hide models only those logins serve. Default false.
+	ClaudeCodeOnly bool `yaml:"claude-code-only" json:"-"`
+
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 

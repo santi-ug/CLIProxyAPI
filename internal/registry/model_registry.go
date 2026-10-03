@@ -1885,6 +1885,27 @@ func (r *ModelRegistry) ClientRegistrationEpoch(clientID string) uint64 {
 	return r.clientEpochs[clientID]
 }
 
+// ModelsProvidedOnlyBy returns the IDs of models whose every registered client is in clientIDs.
+func (r *ModelRegistry) ModelsProvidedOnlyBy(clientIDs map[string]struct{}) map[string]struct{} {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	only := make(map[string]struct{})
+	for clientID := range clientIDs {
+		for _, modelID := range r.clientModels[clientID] {
+			only[modelID] = struct{}{}
+		}
+	}
+	for clientID, modelIDs := range r.clientModels {
+		if _, inSet := clientIDs[clientID]; inSet {
+			continue
+		}
+		for _, modelID := range modelIDs {
+			delete(only, modelID)
+		}
+	}
+	return only
+}
+
 // GetModelsForClient returns the models registered for a specific client.
 // Parameters:
 //   - clientID: The client identifier (typically auth file name or auth ID)
