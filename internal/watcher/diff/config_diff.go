@@ -25,6 +25,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Port != newCfg.Port {
 		changes = append(changes, fmt.Sprintf("port: %d -> %d", oldCfg.Port, newCfg.Port))
 	}
+	if oldCfg.TrustLoopback != newCfg.TrustLoopback {
+		changes = append(changes, fmt.Sprintf("trust-loopback: %t -> %t", oldCfg.TrustLoopback, newCfg.TrustLoopback))
+	}
 	if oldCfg.AuthDir != newCfg.AuthDir {
 		changes = append(changes, fmt.Sprintf("auth-dir: %s -> %s", oldCfg.AuthDir, newCfg.AuthDir))
 	}

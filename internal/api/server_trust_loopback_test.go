@@ -1,0 +1,203 @@
+package api
+
+import (
+	"bufio"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
+	proxyconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+)
+
+// tailnetPeer stands in for a remote client. It is also listed in trusted-proxies so gin's
+// ClientIP() would believe a forged X-Forwarded-For; trust-loopback must not.
+const tailnetPeer = "100.101.102.103"
+
+func newTrustLoopbackTestServer(t *testing.T, trust bool) *Server {
+	t.Helper()
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	server := newTestServerWithConfig(t, &proxyconfig.Config{
+		SDKConfig:      sdkconfig.SDKConfig{APIKeys: []string{"test-key"}},
+		TrustLoopback:  trust,
+		TrustedProxies: []string{tailnetPeer},
+		WebsocketAuth:  true,
+	})
+	server.AttachWebsocketRoute("/v1/ws", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, errUpgrade := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			return
+		}
+		_ = conn.Close()
+	}))
+	return server
+}
+
+func serveFromPeer(server *Server, method, path, remoteAddr string, header http.Header) int {
+	req := httptest.NewRequest(method, path, nil)
+	req.RemoteAddr = remoteAddr
+	for key, values := range header {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
+	recorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(recorder, req)
+	return recorder.Code
+}
+
+// dialWebsocket upgrades over a real loopback socket, so the server sees a 127.0.0.1 peer.
+func dialWebsocket(t *testing.T, server *Server, path string) int {
+	t.Helper()
+	httpServer := httptest.NewServer(server.engine)
+	t.Cleanup(httpServer.Close)
+	conn, resp, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http")+path, nil)
+	if errDial == nil {
+		_ = conn.Close()
+		return http.StatusSwitchingProtocols
+	}
+	if resp == nil {
+		t.Fatalf("dial %s: %v", path, errDial)
+	}
+	return resp.StatusCode
+}
+
+func TestTrustLoopbackSkipsKeyChecksForLoopbackPeer(t *testing.T) {
+	server := newTrustLoopbackTestServer(t, true)
+
+	for _, peer := range []string{"127.0.0.1:52000", "[::1]:52000"} {
+		for _, route := range []struct {
+			method, path string
+			want         int
+		}{
+			{http.MethodGet, "/v1/models", http.StatusOK},
+			{http.MethodGet, "/v1beta/models", http.StatusOK},
+			// 503 means the request got past auth to the unconfigured live relay.
+			{http.MethodPost, "/v1/realtime/calls", http.StatusServiceUnavailable},
+			// No management secret-key is configured at all.
+			{http.MethodGet, "/v0/management/config", http.StatusOK},
+			{http.MethodGet, "/v8/management/credentials", http.StatusOK},
+		} {
+			if got := serveFromPeer(server, route.method, route.path, peer, nil); got != route.want {
+				t.Errorf("%s %s from %s = %d, want %d", route.method, route.path, peer, got, route.want)
+			}
+		}
+	}
+
+	for _, path := range []string{"/v1/ws", "/v1/responses"} {
+		if got := dialWebsocket(t, server, path); got != http.StatusSwitchingProtocols {
+			t.Errorf("websocket %s from loopback = %d, want upgrade", path, got)
+		}
+	}
+}
+
+func TestTrustLoopbackRejectsRemotePeerWithForgedHeaders(t *testing.T) {
+	server := newTrustLoopbackTestServer(t, true)
+	forged := http.Header{
+		"X-Forwarded-For": {"127.0.0.1"},
+		"X-Real-Ip":       {"127.0.0.1"},
+		"Upgrade":         {"websocket"},
+		"Connection":      {"Upgrade"},
+	}
+	peer := tailnetPeer + ":52000"
+
+	for _, route := range []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodGet, "/v1/models", http.StatusUnauthorized},
+		{http.MethodPost, "/v1/realtime/calls", http.StatusUnauthorized},
+		{http.MethodGet, "/v1/ws", http.StatusUnauthorized},
+		{http.MethodGet, "/v1/responses", http.StatusUnauthorized},
+		{http.MethodGet, "/v0/management/config", http.StatusForbidden},
+		{http.MethodGet, "/v8/management/credentials", http.StatusForbidden},
+	} {
+		if got := serveFromPeer(server, route.method, route.path, peer, forged); got != route.want {
+			t.Errorf("%s %s from %s = %d, want %d", route.method, route.path, peer, got, route.want)
+		}
+	}
+}
+
+func TestTrustLoopbackOffKeepsKeyChecks(t *testing.T) {
+	server := newTrustLoopbackTestServer(t, false)
+	peer := "127.0.0.1:52000"
+
+	if got := serveFromPeer(server, http.MethodGet, "/v1/models", peer, nil); got != http.StatusUnauthorized {
+		t.Errorf("/v1/models from loopback = %d, want 401", got)
+	}
+	if got := serveFromPeer(server, http.MethodGet, "/v1/models", peer, http.Header{"Authorization": {"Bearer test-key"}}); got != http.StatusOK {
+		t.Errorf("/v1/models with key = %d, want 200", got)
+	}
+	// Without a secret-key the management API stays unregistered, as upstream.
+	if got := serveFromPeer(server, http.MethodGet, "/v0/management/config", peer, nil); got != http.StatusNotFound {
+		t.Errorf("/v0/management/config without secret = %d, want 404", got)
+	}
+	for _, path := range []string{"/v1/ws", "/v1/responses"} {
+		if got := dialWebsocket(t, server, path); got != http.StatusUnauthorized {
+			t.Errorf("websocket %s from loopback without key = %d, want 401", path, got)
+		}
+	}
+
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
+	withSecret := newTestServerWithConfig(t, &proxyconfig.Config{})
+	if got := serveFromPeer(withSecret, http.MethodGet, "/v0/management/config", peer, nil); got != http.StatusUnauthorized {
+		t.Errorf("/v0/management/config from loopback without key = %d, want 401", got)
+	}
+}
+
+func TestTrustLoopbackHotReload(t *testing.T) {
+	server := newTrustLoopbackTestServer(t, false)
+	peer := "127.0.0.1:52000"
+	check := func(wantAPI, wantManagement int) {
+		t.Helper()
+		if got := serveFromPeer(server, http.MethodGet, "/v1/models", peer, nil); got != wantAPI {
+			t.Errorf("/v1/models = %d, want %d", got, wantAPI)
+		}
+		if got := serveFromPeer(server, http.MethodGet, "/v0/management/config", peer, nil); got != wantManagement {
+			t.Errorf("/v0/management/config = %d, want %d", got, wantManagement)
+		}
+	}
+	reload := func(trust bool) {
+		next := *server.cfg
+		next.TrustLoopback = trust
+		server.UpdateClients(&next)
+	}
+
+	check(http.StatusUnauthorized, http.StatusNotFound)
+	reload(true)
+	check(http.StatusOK, http.StatusOK)
+	reload(false)
+	check(http.StatusUnauthorized, http.StatusNotFound)
+}
+
+func TestTrustLoopbackRedisSkipsAuthForLoopbackPeer(t *testing.T) {
+	redisqueue.SetEnabled(false)
+	t.Cleanup(func() { redisqueue.SetEnabled(false) })
+	server := newTrustLoopbackTestServer(t, true)
+
+	addr, stop := startRedisMuxListener(t, server)
+	t.Cleanup(stop)
+	conn, errDial := net.DialTimeout("tcp", addr, time.Second)
+	if errDial != nil {
+		t.Fatalf("dial: %v", errDial)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	redisqueue.Enqueue([]byte("a"))
+	if errWrite := writeTestRESPCommand(conn, "RPOP", "usage"); errWrite != nil {
+		t.Fatalf("write RPOP: %v", errWrite)
+	}
+	item, errRead := readTestRESPBulkString(bufio.NewReader(conn))
+	if errRead != nil {
+		t.Fatalf("read RPOP without AUTH: %v", errRead)
+	}
+	if string(item) != "a" {
+		t.Fatalf("RPOP item = %q, want %q", item, "a")
+	}
+}

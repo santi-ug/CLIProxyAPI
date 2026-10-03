@@ -42,7 +42,8 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 	}
 
 	clientIP, localClient := resolveRemoteIP(conn.RemoteAddr())
-	authed := false
+	// trust-loopback treats a loopback socket peer as already authenticated.
+	authed := s.trustLoopback.Load() && localClient
 	writer := bufio.NewWriter(conn)
 	defer func() {
 		if errClose := conn.Close(); errClose != nil {

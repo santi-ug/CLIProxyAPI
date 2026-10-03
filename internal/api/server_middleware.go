@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/access"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
@@ -149,14 +150,27 @@ func corsMiddleware() gin.HandlerFunc {
 // using the configured authentication providers. When no providers are available,
 // it allows all requests (legacy behaviour).
 func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, false)
+	return accessAuthMiddleware(manager, false, nil)
 }
 
-func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, true)
+// apiAuthMiddleware is AuthMiddleware plus the trust-loopback bypass. Server routes use it.
+func (s *Server) apiAuthMiddleware() gin.HandlerFunc {
+	return accessAuthMiddleware(s.accessManager, false, s.trustsLoopbackPeer)
 }
 
-func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.HandlerFunc {
+func (s *Server) realtimeStandardAuthMiddleware() gin.HandlerFunc {
+	return accessAuthMiddleware(s.accessManager, true, s.trustsLoopbackPeer)
+}
+
+// trustsLoopbackPeer reports whether trust-loopback is on and the request's TCP peer is loopback.
+func (s *Server) trustsLoopbackPeer(r *http.Request) bool {
+	return s.trustLoopback.Load() && access.IsLoopbackPeer(r)
+}
+
+// accessAuthMiddleware authenticates with the access manager. When trusted reports true for a
+// request that has no valid key, the request continues anyway; a valid key is still recorded so
+// per-key usage keeps working.
+func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, trusted func(*http.Request) bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
 			c.Next()
@@ -172,6 +186,10 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 					c.Set("accessMetadata", result.Metadata)
 				}
 			}
+			c.Next()
+			return
+		}
+		if trusted != nil && trusted(c.Request) {
 			c.Next()
 			return
 		}
@@ -199,8 +217,9 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 	}
 }
 
-func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handler) gin.HandlerFunc {
-	fallback := realtimeStandardAuthMiddleware(manager)
+// realtimeAuthMiddleware accepts a realtime client secret or falls back to the standard key check.
+func (s *Server) realtimeAuthMiddleware(handler *codexlive.Handler) gin.HandlerFunc {
+	fallback := s.realtimeStandardAuthMiddleware()
 	return func(c *gin.Context) {
 		authorization, matched, errAuthenticate := handler.AuthenticateClientSecret(c.Request)
 		if !matched {
