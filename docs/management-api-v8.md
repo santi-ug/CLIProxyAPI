@@ -120,6 +120,17 @@ retain the corresponding business operation's fields.
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
 
+## Credential list fields
+
+Each entry returned by `GET /credentials` (and v0 `GET /auth-files`) also includes:
+
+- `active_requests`: upstream requests currently executing on the credential.
+  Streams and WebSocket turns count until they end.
+- Every top-level metadata key that starts with `pool_` and holds a string, number,
+  or boolean, under the same name. External routing tools set these through
+  `PATCH /credentials/fields`, for example `{"name": "codex-a.json", "pool_mode": "off", "priority": 2}`.
+  Metadata-only edits keep the credential's cooldown, quota, and session bindings.
+
 ## OAuth
 
 The login URL is shared by all providers. Set the required `provider` query

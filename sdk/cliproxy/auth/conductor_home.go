@@ -1422,7 +1422,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			execReq := req
 			execReq.Model = upstreamModel
 			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
-			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+			resp, errExec := trackActive(m, c.auth.ID, func() (cliproxyexecutor.Response, error) {
+				return c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
+			})
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)

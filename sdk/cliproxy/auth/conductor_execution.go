@@ -592,7 +592,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			resp, errExec := trackActive(m, auth.ID, func() (cliproxyexecutor.Response, error) {
+				return executor.Execute(execCtx, auth, execReq, execOpts)
+			})
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -609,7 +611,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					startRetry := time.Now()
-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					resp, errExec = trackActive(m, auth.ID, func() (cliproxyexecutor.Response, error) {
+						return executor.Execute(execCtx, auth, execReq, execOpts)
+					})
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -804,7 +808,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			startExec := time.Now()
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			resp, errExec := trackActive(m, auth.ID, func() (cliproxyexecutor.Response, error) {
+				return executor.CountTokens(execCtx, auth, execReq, execOpts)
+			})
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -821,7 +827,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					execCtx = newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					startRetry := time.Now()
-					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+					resp, errExec = trackActive(m, auth.ID, func() (cliproxyexecutor.Response, error) {
+						return executor.CountTokens(execCtx, auth, execReq, execOpts)
+					})
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {

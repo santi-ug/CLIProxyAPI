@@ -240,7 +240,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				return executor.Execute(execCtx, preparedAuth, execReq, execOpts)
 			}
 			startHomeExec := time.Now()
-			response, errExecute = execute()
+			response, errExecute = trackActive(m, preparedAuth.ID, execute)
 			errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)
 			durationHomeExec := time.Since(startHomeExec)
 			if countTokens {
