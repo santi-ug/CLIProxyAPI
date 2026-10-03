@@ -227,6 +227,13 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	cooldownStateChanged := false
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
+		// An auth re-read from disk (e.g. the file watcher echoing a management PATCH) carries
+		// no runtime state. Keep the live cooldown, quota and status so metadata-only edits do
+		// not make a cooling credential look healthy. Credential changes are handled below;
+		// refresh and prepare modes already merged the live state above.
+		if mode == updateModeReplace && !hasCredentialRuntimeState(auth) {
+			inheritCredentialRuntimeState(auth, existing)
+		}
 		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
@@ -297,6 +304,24 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		m.persistCooldownStates(context.Background())
 	}
 	return auth.Clone(), nil
+}
+
+// hasCredentialRuntimeState reports whether auth carries credential-level cooldown, quota or
+// error state of its own. Auths synthesized from disk or config never do.
+func hasCredentialRuntimeState(auth *Auth) bool {
+	return (auth.Status != "" && auth.Status != StatusActive) || auth.Unavailable || !auth.NextRetryAfter.IsZero() ||
+		auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() || auth.LastError != nil
+}
+
+// inheritCredentialRuntimeState copies the live credential-level status, cooldown and quota
+// from existing into auth. Per-model states are inherited separately.
+func inheritCredentialRuntimeState(auth, existing *Auth) {
+	auth.Status = existing.Status
+	auth.StatusMessage = existing.StatusMessage
+	auth.Unavailable = existing.Unavailable
+	auth.NextRetryAfter = existing.NextRetryAfter
+	auth.Quota = existing.Quota
+	auth.LastError = cloneError(existing.LastError)
 }
 
 // Remove deletes an auth from runtime state without persisting.
