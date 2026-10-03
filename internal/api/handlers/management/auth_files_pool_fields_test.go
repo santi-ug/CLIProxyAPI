@@ -181,7 +181,7 @@ func TestPatchAuthFileFieldsPoolAndPriorityKeepRuntimeState(t *testing.T) {
 	before, _ := manager.GetByID("a.json")
 
 	// priority -1 drops a.json below b.json, so only the binding can keep the session on it.
-	body := `{"name":"a.json","pool_mode":"off","pool_label":"Work","pool_updated_at":1759500000,"priority":-1}`
+	body := `{"name":"a.json","pool_mode":"auto","pool_label":"Work","pool_updated_at":1759500000,"priority":-1}`
 	rec := httptest.NewRecorder()
 	patchCtx, _ := gin.CreateTestContext(rec)
 	patchCtx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
@@ -198,11 +198,11 @@ func TestPatchAuthFileFieldsPoolAndPriorityKeepRuntimeState(t *testing.T) {
 	if errUnmarshal := json.Unmarshal(raw, &onDisk); errUnmarshal != nil {
 		t.Fatal(errUnmarshal)
 	}
-	if onDisk["pool_mode"] != "off" || onDisk["priority"] != float64(-1) {
+	if onDisk["pool_mode"] != "auto" || onDisk["priority"] != float64(-1) {
 		t.Fatalf("file not updated: pool_mode=%#v priority=%#v", onDisk["pool_mode"], onDisk["priority"])
 	}
 	entry := listAuthFileEntries(t, h)["a.json"]
-	if entry["pool_mode"] != "off" || entry["pool_label"] != "Work" || entry["pool_updated_at"] != float64(1759500000) || entry["priority"] != float64(-1) {
+	if entry["pool_mode"] != "auto" || entry["pool_label"] != "Work" || entry["pool_updated_at"] != float64(1759500000) || entry["priority"] != float64(-1) {
 		t.Fatalf("list after patch: %v", entry)
 	}
 

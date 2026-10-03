@@ -923,6 +923,21 @@ func (m *Manager) pickViaBuiltinScheduler(ctx context.Context, strategy schedule
 	if m == nil || m.scheduler == nil {
 		return nil, false, nil
 	}
+	// A plugin can delegate to the cached built-in scheduler. Carry the same
+	// live reserve exclusions used by native candidate collection into it.
+	excluded := make(map[string]struct{}, len(tried))
+	for id := range tried {
+		excluded[id] = struct{}{}
+	}
+	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	m.mu.RLock()
+	for _, auth := range m.auths {
+		if protectedPoolReserve(auth) && !m.reserveFallbackAllowedLocked(ctx, auth, model, eligibility, time.Now()) {
+			excluded[auth.ID] = struct{}{}
+		}
+	}
+	m.mu.RUnlock()
+	tried = excluded
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	var selected *Auth
 	var errPick error
@@ -1638,6 +1653,16 @@ func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
 	}
+	// Pool fallback uses live primary quota evidence, including this request's
+	// failures, so a cached scheduler eligibility snapshot cannot decide it.
+	m.mu.RLock()
+	for _, auth := range m.auths {
+		if protectedPoolReserve(auth) {
+			m.mu.RUnlock()
+			return false
+		}
+	}
+	m.mu.RUnlock()
 	return isBuiltInSelector(m.Selector())
 }
 
@@ -1765,6 +1790,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 			continue
 		}
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+			continue
+		}
+		if !m.reserveFallbackAllowedLocked(ctx, candidate, model, eligibility, time.Now()) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -2099,6 +2127,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 			continue
 		}
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+			continue
+		}
+		if !m.reserveFallbackAllowedLocked(ctx, candidate, model, eligibility, time.Now()) {
 			continue
 		}
 		candidates = append(candidates, candidate)

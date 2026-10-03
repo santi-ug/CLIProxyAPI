@@ -68,21 +68,9 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
-	if req.ExpectedPoolMode != nil {
-		expected := strings.ToLower(strings.TrimSpace(*req.ExpectedPoolMode))
-		if expected != "auto" && expected != "on" && expected != "off" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "expected_pool_mode must be auto, on, or off"})
-			return
-		}
-		mode, _ := targetAuth.Metadata["pool_mode"].(string)
-		mode = strings.ToLower(strings.TrimSpace(mode))
-		if mode == "" {
-			mode = "auto"
-		}
-		if mode != expected {
-			c.JSON(http.StatusConflict, gin.H{"error": "pool_mode changed", "pool_mode": mode})
-			return
-		}
+	if errMode := validateExpectedPoolMode(req.ExpectedPoolMode); errMode != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMode.Error()})
+		return
 	}
 	if coreauth.IsPluginVirtualAuth(targetAuth) {
 		// Allow status changes only when targeting the source auth file name, matching delete semantics.
@@ -142,10 +130,19 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
-	applyAuthDisabledState(targetAuth, *req.Disabled)
-	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
+	updatedAuth, err := h.authManager.UpdateManagedAuth(ctx, targetAuth.ID, func(current *coreauth.Auth) error {
+		if errMode := checkExpectedPoolMode(current, req.ExpectedPoolMode); errMode != nil {
+			return errMode
+		}
+		applyAuthDisabledState(current, *req.Disabled)
+		return nil
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		writeAuthFilePatchError(c, err)
+		return
+	}
+	if updatedAuth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
 	hookAuth := updatedAuth
@@ -302,6 +299,20 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		return
 	}
 	delete(req, "name")
+	var expectedPoolMode *string
+	if raw, exists := req["expected_pool_mode"]; exists {
+		var mode string
+		if errDecode := json.Unmarshal(raw, &mode); errDecode != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "expected_pool_mode must be auto, on, or off"})
+			return
+		}
+		expectedPoolMode = &mode
+		delete(req, "expected_pool_mode")
+		if errMode := validateExpectedPoolMode(expectedPoolMode); errMode != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errMode.Error()})
+			return
+		}
+	}
 	var errNormalize error
 	req, errNormalize = normalizeAuthFilePatchFields(req)
 	if errNormalize != nil {
@@ -352,79 +363,100 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
 		return
 	}
-	coreauth.NormalizeCredentialMetadata(targetAuth.Metadata)
+	updatedAuth, err := h.authManager.UpdateManagedAuth(ctx, targetAuth.ID, func(current *coreauth.Auth) error {
+		if errMode := checkExpectedPoolMode(current, expectedPoolMode); errMode != nil {
+			return errMode
+		}
+		coreauth.NormalizeCredentialMetadata(current.Metadata)
 
-	changed := false
-	touchedRoots := make(map[string]struct{}, len(req))
-	for key, rawValue := range req {
-		fieldPath := strings.TrimSpace(key)
-		if fieldPath == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "field name is required"})
-			return
-		}
-		value, errDecode := decodeAuthFileFieldValue(rawValue)
-		if errDecode != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid field %s", fieldPath)})
-			return
-		}
-		if targetAuth.Metadata == nil {
-			targetAuth.Metadata = make(map[string]any)
-		}
-
-		if fieldPath == coreauth.AttributeWeight {
-			if value == nil {
-				delete(targetAuth.Metadata, coreauth.AttributeWeight)
-			} else {
-				if _, okNumber := value.(json.Number); !okNumber {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "weight must be an integer"})
-					return
-				}
-				weight, errWeight := credentialweight.ParseValue(value)
-				if errWeight != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"error": errWeight.Error()})
-					return
-				}
-				targetAuth.Metadata[coreauth.AttributeWeight] = weight
+		changed := false
+		touchedRoots := make(map[string]struct{}, len(req))
+		for key, rawValue := range req {
+			fieldPath := strings.TrimSpace(key)
+			if fieldPath == "" {
+				return &authFilePatchError{status: http.StatusBadRequest, message: "field name is required"}
 			}
-		} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "weight does not support nested fields"})
-			return
-		} else if fieldPath == "headers" {
-			applyAuthFileHeadersPatch(targetAuth, value)
-		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errSet.Error()})
-			return
-		}
-		if root := rootAuthFileField(fieldPath); root != "" {
-			touchedRoots[root] = struct{}{}
-		}
-		changed = true
-	}
-	if requestRetryPatch.Set {
-		if targetAuth.Metadata == nil {
-			targetAuth.Metadata = make(map[string]any)
-		}
-		if requestRetryPatch.Value == nil {
-			delete(targetAuth.Metadata, "request_retry")
-		} else {
-			targetAuth.Metadata["request_retry"] = *requestRetryPatch.Value
-		}
-		changed = true
-	}
-	if changed {
-		syncAuthFileMetadataFields(targetAuth, touchedRoots)
-	}
+			value, errDecode := decodeAuthFileFieldValue(rawValue)
+			if errDecode != nil {
+				return &authFilePatchError{status: http.StatusBadRequest, message: fmt.Sprintf("invalid field %s", fieldPath)}
+			}
+			if current.Metadata == nil {
+				current.Metadata = make(map[string]any)
+			}
 
-	if !changed {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+			if fieldPath == coreauth.AttributeWeight {
+				if value == nil {
+					delete(current.Metadata, coreauth.AttributeWeight)
+				} else {
+					if _, okNumber := value.(json.Number); !okNumber {
+						return &authFilePatchError{status: http.StatusBadRequest, message: "weight must be an integer"}
+					}
+					weight, errWeight := credentialweight.ParseValue(value)
+					if errWeight != nil {
+						return &authFilePatchError{status: http.StatusBadRequest, message: errWeight.Error()}
+					}
+					current.Metadata[coreauth.AttributeWeight] = weight
+				}
+			} else if rootAuthFileField(fieldPath) == coreauth.AttributeWeight {
+				return &authFilePatchError{status: http.StatusBadRequest, message: "weight does not support nested fields"}
+			} else if fieldPath == "headers" {
+				applyAuthFileHeadersPatch(current, value)
+			} else if errSet := setAuthFileMetadataValue(current.Metadata, fieldPath, value); errSet != nil {
+				return &authFilePatchError{status: http.StatusBadRequest, message: errSet.Error()}
+			}
+			if root := rootAuthFileField(fieldPath); root != "" {
+				touchedRoots[root] = struct{}{}
+			}
+			changed = true
+		}
+		if requestRetryPatch.Set {
+			if current.Metadata == nil {
+				current.Metadata = make(map[string]any)
+			}
+			if requestRetryPatch.Value == nil {
+				delete(current.Metadata, "request_retry")
+			} else {
+				current.Metadata["request_retry"] = *requestRetryPatch.Value
+			}
+			changed = true
+		}
+		if changed {
+			if _, touchedMode := touchedRoots["pool_mode"]; touchedMode {
+				mode, ok := current.Metadata["pool_mode"].(string)
+				mode = strings.ToLower(strings.TrimSpace(mode))
+				if !ok || (mode != "auto" && mode != "on" && mode != "off") {
+					return &authFilePatchError{status: http.StatusBadRequest, message: "pool_mode must be auto, on, or off"}
+				}
+				current.Metadata["pool_mode"] = mode
+				if mode == "on" || mode == "off" {
+					applyAuthDisabledState(current, mode == "off")
+					priority := 50
+					if role, _ := current.Metadata["pool_role"].(string); strings.EqualFold(strings.TrimSpace(role), "primary") {
+						priority = 100
+					}
+					if mode == "off" {
+						priority = -1
+					}
+					current.Metadata["priority"] = priority
+					touchedRoots["priority"] = struct{}{}
+				}
+			}
+			syncAuthFileMetadataFields(current, touchedRoots)
+		}
+
+		if !changed {
+			return &authFilePatchError{status: http.StatusBadRequest, message: "no fields to update"}
+		}
+
+		current.UpdatedAt = time.Now()
+		return nil
+	})
+	if err != nil {
+		writeAuthFilePatchError(c, err)
 		return
 	}
-
-	targetAuth.UpdatedAt = time.Now()
-
-	updatedAuth, err := h.authManager.Update(ctx, targetAuth)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+	if updatedAuth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
 	locked = false
@@ -441,6 +473,48 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+type authFilePatchError struct {
+	status  int
+	message string
+}
+
+func (e *authFilePatchError) Error() string { return e.message }
+
+func writeAuthFilePatchError(c *gin.Context, err error) {
+	var patchErr *authFilePatchError
+	if errors.As(err, &patchErr) {
+		c.JSON(patchErr.status, gin.H{"error": patchErr.message})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+}
+
+func validateExpectedPoolMode(expected *string) error {
+	if expected == nil {
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(*expected))
+	if mode != "auto" && mode != "on" && mode != "off" {
+		return fmt.Errorf("expected_pool_mode must be auto, on, or off")
+	}
+	return nil
+}
+
+func checkExpectedPoolMode(auth *coreauth.Auth, expected *string) error {
+	if expected == nil {
+		return nil
+	}
+	mode, _ := auth.Metadata["pool_mode"].(string)
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = "auto"
+	}
+	if mode != strings.ToLower(strings.TrimSpace(*expected)) {
+		return &authFilePatchError{status: http.StatusConflict, message: "pool_mode changed"}
+	}
+	return nil
 }
 
 func decodeAuthFileFieldValue(raw json.RawMessage) (any, error) {

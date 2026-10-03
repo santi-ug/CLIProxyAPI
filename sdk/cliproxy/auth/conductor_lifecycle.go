@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -148,26 +149,33 @@ const (
 	updateModeReplace updateAuthMode = iota
 	updateModeRefresh
 	updateModePrepare
+	updateModeManaged
 )
 
 // UpdatePreparedAuth atomically merges request preparation results into the latest runtime auth
 // under the manager lock, preserving concurrent modifications without modifying refresh lifecycle fields.
 func (m *Manager) UpdatePreparedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
-	return m.updateInternal(ctx, base, updated, updateModePrepare)
+	return m.updateInternal(ctx, base, updated, updateModePrepare, nil)
 }
 
 // UpdateRefreshedAuth atomically merges refresh results into the latest runtime auth
 // under the manager lock, preserving concurrent modifications (proxy_url, notes, weights, etc.).
 func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
-	return m.updateInternal(ctx, base, updated, updateModeRefresh)
+	return m.updateInternal(ctx, base, updated, updateModeRefresh, nil)
 }
 
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
-	return m.updateInternal(ctx, nil, auth, updateModeReplace)
+	return m.updateInternal(ctx, nil, auth, updateModeReplace, nil)
 }
 
-func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode) (*Auth, error) {
+// UpdateManagedAuth checks and mutates the latest auth under the manager lock.
+// The callback must not call manager methods. Persistence succeeds before publication.
+func (m *Manager) UpdateManagedAuth(ctx context.Context, id string, mutate func(*Auth) error) (*Auth, error) {
+	return m.updateInternal(ctx, nil, &Auth{ID: id}, updateModeManaged, mutate)
+}
+
+func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode, mutate func(*Auth) error) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
@@ -180,6 +188,39 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if !ok || existing == nil {
 		m.mu.Unlock()
 		return nil, nil
+	}
+	if mode == updateModeManaged {
+		auth = existing.Clone()
+		auth.Metadata = cloneManagedMetadata(existing.Metadata)
+		if mutate != nil {
+			if errMutate := mutate(auth); errMutate != nil {
+				m.mu.Unlock()
+				return nil, errMutate
+			}
+		}
+		NormalizeCredentialMetadata(auth.Metadata)
+		if poolMetadataString(auth, "pool_mode") == "on" && poolMetadataString(auth, "pool_role") == "reserve" {
+			// Keep manual On behind every configured primary, even if its
+			// priority is lower than the router's usual primary tier of 100.
+			priority := 50
+			for _, primary := range m.auths {
+				if primary == nil || primary.ID == auth.ID || primary.Disabled || primary.Status == StatusDisabled || poolMetadataString(primary, "pool_mode") == "off" || executorKeyFromAuth(primary) != executorKeyFromAuth(auth) || poolMetadataString(primary, "pool_role") != "primary" {
+					continue
+				}
+				if p := authPriority(primary); p <= priority {
+					priority = p - 1
+				}
+			}
+			auth.Metadata["priority"] = priority
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string)
+			}
+			auth.Attributes["priority"] = strconv.Itoa(priority)
+		}
+		if errWeight := ValidateAuthWeight(auth); errWeight != nil {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("update auth: %w", errWeight)
+		}
 	}
 	if m.authEpochs == nil {
 		m.authEpochs = make(map[string]uint64)
@@ -298,10 +339,11 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	// Keep the epoch check, save and installation together so a concurrent reload
 	// or removal cannot let an obsolete mint overwrite the credential on disk.
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
-	if persistMetaMint {
+	persistBeforePublish := persistMetaMint || mode == updateModeManaged
+	if persistBeforePublish {
 		if errPersist := m.persist(ctx, auth); errPersist != nil {
 			m.mu.Unlock()
-			return nil, fmt.Errorf("persist meta auth: %w", errPersist)
+			return nil, fmt.Errorf("persist auth: %w", errPersist)
 		}
 	}
 	authClone := auth.Clone()
@@ -320,7 +362,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(auth.ID)
-	if !persistMetaMint {
+	if !persistBeforePublish {
 		// Persist failures stay non-fatal, but must not be silent: after a token
 		// refresh the rotated credentials only exist in memory until persisted.
 		if errPersist := m.persist(ctx, auth); errPersist != nil {
@@ -332,6 +374,34 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		m.persistCooldownStates(context.Background())
 	}
 	return auth.Clone(), nil
+}
+
+// Metadata patches can edit nested JSON maps. Keep a rejected mutation from
+// changing the published auth through Auth.Clone's shallow metadata values.
+func cloneManagedMetadata(metadata map[string]any) map[string]any {
+	if metadata == nil {
+		return nil
+	}
+	clone := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		clone[key] = cloneManagedMetadataValue(value)
+	}
+	return clone
+}
+
+func cloneManagedMetadataValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneManagedMetadata(typed)
+	case []any:
+		clone := make([]any, len(typed))
+		for index, item := range typed {
+			clone[index] = cloneManagedMetadataValue(item)
+		}
+		return clone
+	default:
+		return value
+	}
 }
 
 // hasCredentialRuntimeState reports whether auth carries credential-level cooldown, quota or

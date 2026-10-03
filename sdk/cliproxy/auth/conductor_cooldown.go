@@ -762,6 +762,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 	}
+	recordPoolAttemptResult(ctx, result)
 	modelKey := canonicalModelKey(result.Model)
 
 	var authSnapshot *Auth
