@@ -286,3 +286,38 @@ func TestTrustLoopbackWithoutAPIKeysStillRejectsBrowsers(t *testing.T) {
 		t.Fatalf("trusted localhost=%d", got)
 	}
 }
+
+func TestTrustLoopbackHTTPMultiplexerOrigin(t *testing.T) {
+	server := newTrustLoopbackTestServer(t, true)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	httpListener := newMuxListener(listener.Addr(), 16)
+	defer httpListener.Close()
+	defer server.server.Close()
+	go func() { _ = server.server.Serve(httpListener) }()
+	go func() { _ = server.acceptMuxConnections(listener, httpListener) }()
+	addr := listener.Addr().String()
+	for _, path := range []string{"/v1/models", "/v0/management/config", "/v8/management/credentials"} {
+		for _, origin := range []string{"http://" + addr, "https://" + addr} {
+			req, err := http.NewRequest("GET", "http://"+addr+path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Origin", origin)
+			response, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if origin == "http://"+addr && response.StatusCode != http.StatusOK {
+				t.Fatalf("%s local HTTP origin returned %d", path, response.StatusCode)
+			}
+			if origin == "https://"+addr && response.StatusCode < 400 {
+				t.Fatalf("%s accepted HTTPS origin over plain HTTP", path)
+			}
+		}
+	}
+}

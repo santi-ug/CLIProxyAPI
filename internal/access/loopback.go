@@ -54,7 +54,9 @@ func IsTrustedLoopbackRequest(r *http.Request, hosts []string) bool {
 		return false
 	}
 	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+	// The protocol multiplexer exposes ConnectionState even on plain TCP, so
+	// net/http supplies a non-nil empty TLS state without a completed handshake.
+	if (r.TLS != nil && r.TLS.HandshakeComplete) || r.Header.Get("X-Forwarded-Proto") == "https" {
 		scheme = "https"
 	}
 	return origin.Scheme == scheme && origin.Host == r.Host

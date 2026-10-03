@@ -1,6 +1,7 @@
 package access
 
 import (
+	"crypto/tls"
 	"net/http/httptest"
 	"testing"
 )
@@ -59,5 +60,38 @@ func TestTrustedLoopbackBrowserBoundary(t *testing.T) {
 				t.Fatalf("got %t, want %t", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestTrustedLoopbackEmptyTLSStateIsHTTP(t *testing.T) {
+	r := httptest.NewRequest("GET", "http://localhost:8317/v1/models", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
+	r.TLS = &tls.ConnectionState{}
+	r.Header.Set("Origin", "http://localhost:8317")
+	if !IsTrustedLoopbackRequest(r, nil) {
+		t.Fatal("plain HTTP wrapper treated as TLS")
+	}
+	r.Header.Set("Origin", "https://localhost:8317")
+	if IsTrustedLoopbackRequest(r, nil) {
+		t.Fatal("plain HTTP accepted HTTPS Origin")
+	}
+	r.TLS.HandshakeComplete = true
+	if !IsTrustedLoopbackRequest(r, nil) {
+		t.Fatal("completed TLS handshake rejected HTTPS Origin")
+	}
+}
+
+func TestTrustedLoopbackForwardedHTTPSOrigin(t *testing.T) {
+	r := httptest.NewRequest("GET", "http://mac.tailnet.ts.net:8318/v1/models", nil)
+	r.RemoteAddr = "127.0.0.1:1234"
+	r.TLS = &tls.ConnectionState{}
+	r.Header.Set("X-Forwarded-Proto", "https")
+	r.Header.Set("Origin", "https://mac.tailnet.ts.net:8318")
+	if !IsTrustedLoopbackRequest(r, []string{"mac.tailnet.ts.net:8318"}) {
+		t.Fatal("private TLS reverse proxy origin rejected")
+	}
+	r.Header.Set("Origin", "http://mac.tailnet.ts.net:8318")
+	if IsTrustedLoopbackRequest(r, []string{"mac.tailnet.ts.net:8318"}) {
+		t.Fatal("forwarded HTTPS accepted HTTP origin")
 	}
 }
