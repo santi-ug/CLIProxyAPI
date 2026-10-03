@@ -545,5 +545,11 @@ func poolPolicyManaged(auth *Auth) bool {
 		return false
 	}
 	mode, _ := auth.Metadata["pool_mode"].(string)
-	return mode == "auto" || mode == "on" || mode == "off"
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "auto" || mode == "on" || mode == "off" {
+		return true
+	}
+	_, hasLabel := auth.Metadata["pool_label"]
+	_, hasState := auth.Metadata["pool_state"]
+	return mode == "" && (hasLabel || hasState)
 }

@@ -263,3 +263,28 @@ func TestPoolStatusRejectsStaleRouterAndKeepsCooldown(t *testing.T) {
 		t.Fatal("resume erased quota cooldown")
 	}
 }
+
+func TestNewPoolAccountDefaultAutoKeepsCooldown(t *testing.T) {
+	manager, dir := newPoolTestManager(t, nil, map[string]map[string]any{"new-pool.json": {"pool_label": "new-account"}})
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: dir}, manager)
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "new-pool.json", Provider: "codex", Model: poolTestModel, Error: &coreauth.Error{HTTPStatus: 429, Message: "quota"}})
+	before, _ := manager.GetByID("new-pool.json")
+	for _, disabled := range []bool{true, false} {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		payload, _ := json.Marshal(map[string]any{"name": "new-pool.json", "disabled": disabled, "expected_pool_mode": "auto"})
+		c.Request = httptest.NewRequest("PATCH", "/v8/management/auth-files/status", strings.NewReader(string(payload)))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.PatchAuthFileStatus(c)
+		if rec.Code != 200 {
+			t.Fatalf("status=%d %s", rec.Code, rec.Body.String())
+		}
+		current, _ := manager.GetByID("new-pool.json")
+		if !current.Quota.Exceeded || !current.NextRetryAfter.Equal(before.NextRetryAfter) {
+			t.Fatal("default Auto pause erased quota")
+		}
+		if _, exists := current.Metadata["pool_mode"]; exists {
+			t.Fatal("status PATCH rewrote user mode")
+		}
+	}
+}

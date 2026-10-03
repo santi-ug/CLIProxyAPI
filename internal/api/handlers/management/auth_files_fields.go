@@ -83,10 +83,6 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": "pool_mode changed", "pool_mode": mode})
 			return
 		}
-		if targetAuth.Metadata == nil {
-			targetAuth.Metadata = make(map[string]any)
-		}
-		targetAuth.Metadata["pool_mode"] = mode
 	}
 	if coreauth.IsPluginVirtualAuth(targetAuth) {
 		// Allow status changes only when targeting the source auth file name, matching delete semantics.
