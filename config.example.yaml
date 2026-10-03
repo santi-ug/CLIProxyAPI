@@ -20,6 +20,7 @@ server:
   # Pair with host: "127.0.0.1" and Tailscale Serve so the tailnet is the only remote way in.
   trust-loopback: false
   # Exact private reverse-proxy hosts accepted for keyless loopback traffic.
+  # Use "host:port" to restrict the authority; a bare hostname accepts any port.
   # Browser Origins must match Host and scheme. Never use Tailscale Funnel with this flag.
   trust-loopback-hosts: []
 

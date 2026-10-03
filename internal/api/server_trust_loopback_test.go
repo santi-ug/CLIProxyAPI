@@ -261,3 +261,28 @@ func TestTrustLoopbackRedisReloadRevokesSubscription(t *testing.T) {
 	}
 	t.Fatal("subscription kept sending after revocation")
 }
+
+func TestTrustLoopbackWithoutAPIKeysStillRejectsBrowsers(t *testing.T) {
+	server := newTestServerWithConfig(t, &proxyconfig.Config{TrustLoopback: true})
+	server.AttachWebsocketRoute("/keyless-ws", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	for _, path := range []string{"/v1/models", "/keyless-ws", "/v1/responses"} {
+		for _, attack := range []string{"origin", "host"} {
+			req := httptest.NewRequest("GET", path, nil)
+			req.RemoteAddr = "127.0.0.1:1234"
+			req.Host = "localhost"
+			if attack == "origin" {
+				req.Header.Set("Origin", "https://evil.test")
+			} else {
+				req.Host = "evil.test"
+			}
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnauthorized {
+				t.Fatalf("%s %s without keys=%d", path, attack, rr.Code)
+			}
+		}
+	}
+	if got := serveFromPeer(server, "GET", "/v1/models", "127.0.0.1:1234", nil); got != http.StatusOK {
+		t.Fatalf("trusted localhost=%d", got)
+	}
+}

@@ -153,16 +153,16 @@ func corsMiddleware() gin.HandlerFunc {
 // using the configured authentication providers. When no providers are available,
 // it allows all requests (legacy behaviour).
 func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, false, nil)
+	return accessAuthMiddleware(manager, false, nil, nil)
 }
 
 // apiAuthMiddleware is AuthMiddleware plus the trust-loopback bypass. Server routes use it.
 func (s *Server) apiAuthMiddleware() gin.HandlerFunc {
-	return accessAuthMiddleware(s.accessManager, false, s.trustsLoopbackPeer)
+	return accessAuthMiddleware(s.accessManager, false, s.trustsLoopbackPeer, s.trustLoopback.Load)
 }
 
 func (s *Server) realtimeStandardAuthMiddleware() gin.HandlerFunc {
-	return accessAuthMiddleware(s.accessManager, true, s.trustsLoopbackPeer)
+	return accessAuthMiddleware(s.accessManager, true, s.trustsLoopbackPeer, s.trustLoopback.Load)
 }
 
 // trustsLoopbackPeer reports whether trust-loopback is on and the request's TCP peer is loopback.
@@ -175,14 +175,18 @@ func (s *Server) trustsLoopbackPeer(r *http.Request) bool {
 // accessAuthMiddleware authenticates with the access manager. When trusted reports true for a
 // request that has no valid key, the request continues anyway; a valid key is still recorded so
 // per-key usage keeps working.
-func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, trusted func(*http.Request) bool) gin.HandlerFunc {
+func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, trusted func(*http.Request) bool, requireIdentity func() bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if manager == nil {
-			c.Next()
-			return
+		var result *sdkaccess.Result
+		var err *sdkaccess.AuthError
+		if manager != nil {
+			result, err = manager.Authenticate(c.Request.Context(), c.Request)
 		}
-
-		result, err := manager.Authenticate(c.Request.Context(), c.Request)
+		// Empty providers are the legacy public API, not a successfully authenticated key.
+		// With local trust enabled, even an empty key list must respect the browser boundary.
+		if err == nil && result == nil && requireIdentity != nil && requireIdentity() {
+			err = sdkaccess.NewNoCredentialsError()
+		}
 		if err == nil {
 			if result != nil {
 				c.Set("userApiKey", result.Principal)

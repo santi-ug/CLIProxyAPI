@@ -32,7 +32,12 @@ func IsTrustedLoopbackRequest(r *http.Request, hosts []string) bool {
 	host = strings.Trim(host, "[]")
 	allowed := host == "localhost" || host == "127.0.0.1" || host == "::1"
 	for _, extra := range hosts {
-		allowed = allowed || host == strings.ToLower(strings.TrimSpace(extra))
+		extra = strings.ToLower(strings.TrimSpace(extra))
+		if _, _, err := net.SplitHostPort(extra); err == nil {
+			allowed = allowed || strings.ToLower(r.Host) == extra
+		} else {
+			allowed = allowed || host == extra
+		}
 	}
 	if !allowed {
 		return false

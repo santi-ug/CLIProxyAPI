@@ -41,6 +41,9 @@ func TestTrustedLoopbackBrowserBoundary(t *testing.T) {
 		{"different port", "127.0.0.1:1234", "localhost:8317", "http://localhost:1234", nil, false},
 		{"null origin", "127.0.0.1:1234", "localhost", "null", nil, false},
 		{"private proxy", "127.0.0.1:1234", "mac.tailnet.ts.net", "http://mac.tailnet.ts.net", []string{"mac.tailnet.ts.net"}, true},
+		{"proxy exact authority", "127.0.0.1:1234", "mac.tailnet.ts.net:8318", "http://mac.tailnet.ts.net:8318", []string{"mac.tailnet.ts.net:8318"}, true},
+		{"proxy wrong port", "127.0.0.1:1234", "mac.tailnet.ts.net:8317", "", []string{"mac.tailnet.ts.net:8318"}, false},
+		{"proxy hostname with port", "127.0.0.1:1234", "mac.tailnet.ts.net:8318", "", []string{"mac.tailnet.ts.net"}, true},
 		{"remote socket", "100.100.100.100:1234", "localhost", "", nil, false},
 		{"mapped ipv4", "[::ffff:127.0.0.1]:1234", "127.0.0.1", "", nil, true},
 	} {

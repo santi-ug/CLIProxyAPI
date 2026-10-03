@@ -15,7 +15,7 @@ type Config struct {
 	// TrustLoopback permits keyless requests from a loopback socket with an allowed Host
 	// and no Origin or an exact same-origin Origin. Never expose it through a public tunnel.
 	TrustLoopback bool `yaml:"trust-loopback" json:"-"`
-	// TrustLoopbackHosts adds exact private reverse-proxy hostnames to localhost defaults.
+	// TrustLoopbackHosts adds private proxy hostnames or exact host:port authorities.
 	TrustLoopbackHosts []string `yaml:"trust-loopback-hosts" json:"-"`
 
 	// TrustedProxies lists the IPs or CIDRs allowed to provide forwarded client IP headers.

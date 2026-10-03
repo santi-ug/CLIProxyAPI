@@ -561,7 +561,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 
 	authMiddleware := s.apiAuthMiddleware()
 	conditionalAuth := func(c *gin.Context) {
-		if !s.wsAuthEnabled.Load() {
+		if !s.wsAuthEnabled.Load() && !s.trustLoopback.Load() {
 			c.Next()
 			return
 		}
