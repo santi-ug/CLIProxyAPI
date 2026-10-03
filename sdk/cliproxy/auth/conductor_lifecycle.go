@@ -250,19 +250,21 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 			auth.ModelStates = existing.Clone().ModelStates
 		}
 		if credChanged {
-			// Re-login replaces the credentials that caused non-quota failures. Keep quota
-			// cooldowns, but do not carry terminal or request errors into the new login.
-			if !auth.Quota.Exceeded {
-				auth.Unavailable = false
-				auth.NextRetryAfter = time.Time{}
-				auth.LastError = nil
-				auth.StatusMessage = ""
-				auth.Status = StatusActive
-			}
-			for _, state := range auth.ModelStates {
-				if state != nil && !state.Quota.Exceeded {
-					resetModelState(state, time.Now())
-					cooldownStateChanged = true
+			if mode == updateModeReplace {
+				// Re-login replaces the credentials that caused non-quota failures. Keep quota
+				// cooldowns, but do not carry terminal or request errors into the new login.
+				if !auth.Quota.Exceeded {
+					auth.Unavailable = false
+					auth.NextRetryAfter = time.Time{}
+					auth.LastError = nil
+					auth.StatusMessage = ""
+					auth.Status = StatusActive
+				}
+				for _, state := range auth.ModelStates {
+					if state != nil && !state.Quota.Exceeded {
+						resetModelState(state, time.Now())
+						cooldownStateChanged = true
+					}
 				}
 			}
 			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
