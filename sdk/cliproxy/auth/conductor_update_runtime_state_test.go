@@ -106,3 +106,40 @@ func TestReloginClearsNonQuotaFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestPoolPauseCooldownPersistence(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	a := diskSnapshot("paused", "token", map[string]any{"pool_mode": "auto"})
+	if _, err := m.Register(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	m.MarkResult(ctx, Result{AuthID: a.ID, Provider: "codex", Model: "model", Error: &Error{HTTPStatus: 429, Message: "quota"}})
+	current, _ := m.GetByID(a.ID)
+	current.Disabled = true
+	current.Status = StatusDisabled
+	if _, err := m.Update(ctx, current); err != nil {
+		t.Fatal(err)
+	}
+	records := m.cooldownStateRecordsSnapshot()
+	if len(records) == 0 {
+		t.Fatal("pool pause discarded persistent cooldown records")
+	}
+	restored := NewManager(nil, nil, nil)
+	a.Disabled = true
+	a.Status = StatusDisabled
+	if _, err := restored.Register(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	restored.mu.Lock()
+	for _, record := range records {
+		if !restored.restoreCooldownRecordLocked(record, time.Now()) {
+			t.Fatal("paused cooldown not restored")
+		}
+	}
+	restored.mu.Unlock()
+	after, _ := restored.GetByID(a.ID)
+	if !after.Disabled || after.Status != StatusDisabled || !after.Quota.Exceeded {
+		t.Fatal("restore lost pool pause or quota")
+	}
+}

@@ -32,9 +32,10 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	var req struct {
-		Name      string `json:"name"`
-		AuthIndex string `json:"auth_index"`
-		Disabled  *bool  `json:"disabled"`
+		Name             string  `json:"name"`
+		AuthIndex        string  `json:"auth_index"`
+		Disabled         *bool   `json:"disabled"`
+		ExpectedPoolMode *string `json:"expected_pool_mode"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -66,6 +67,26 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	if targetAuth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
+	}
+	if req.ExpectedPoolMode != nil {
+		expected := strings.ToLower(strings.TrimSpace(*req.ExpectedPoolMode))
+		if expected != "auto" && expected != "on" && expected != "off" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "expected_pool_mode must be auto, on, or off"})
+			return
+		}
+		mode, _ := targetAuth.Metadata["pool_mode"].(string)
+		mode = strings.ToLower(strings.TrimSpace(mode))
+		if mode == "" {
+			mode = "auto"
+		}
+		if mode != expected {
+			c.JSON(http.StatusConflict, gin.H{"error": "pool_mode changed", "pool_mode": mode})
+			return
+		}
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		targetAuth.Metadata["pool_mode"] = mode
 	}
 	if coreauth.IsPluginVirtualAuth(targetAuth) {
 		// Allow status changes only when targeting the source auth file name, matching delete semantics.
@@ -302,6 +323,15 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		}
 	}
 
+	// Serialize metadata writes with status compare-and-set so user pool changes win.
+	h.authStatusMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			h.authStatusMu.Unlock()
+		}
+	}()
+
 	ctx := c.Request.Context()
 
 	// Find auth by name or ID
@@ -401,6 +431,8 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
+	locked = false
+	h.authStatusMu.Unlock()
 	if h.postAuthPersistHook != nil {
 		hookAuth := updatedAuth
 		if hookAuth == nil {

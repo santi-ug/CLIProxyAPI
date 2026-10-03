@@ -97,7 +97,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.UpdatedAt = now
 	cooldownStateChanged := normalizeModelStates(auth)
-	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
+	if m.cooldownDisabledForAuth(auth) || ((auth.Disabled || auth.Status == StatusDisabled) && !poolPolicyManaged(auth)) {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	}
 	auth.EnsureIndex()
@@ -226,6 +226,17 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		auth.Generation++
 	}
 	cooldownStateChanged := false
+	if poolPolicyManaged(auth) && !CredentialsChanged(existing, auth) {
+		if auth.Disabled || existing.Disabled {
+			auth.Unavailable = existing.Unavailable
+			auth.NextRetryAfter = existing.NextRetryAfter
+			auth.Quota = existing.Quota
+			auth.LastError = cloneError(existing.LastError)
+			if len(auth.ModelStates) == 0 {
+				auth.ModelStates = existing.Clone().ModelStates
+			}
+		}
+	}
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
 		// An auth re-read from disk (e.g. the file watcher echoing a management PATCH) carries
 		// no runtime state. Keep the live cooldown, quota and status so metadata-only edits do
@@ -277,7 +288,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	now := time.Now()
 	auth.UpdatedAt = now
 	cooldownStateChanged = normalizeModelStates(auth) || cooldownStateChanged
-	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
+	if m.cooldownDisabledForAuth(auth) || ((auth.Disabled || auth.Status == StatusDisabled) && !poolPolicyManaged(auth)) {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	}
 	auth.EnsureIndex()
@@ -526,4 +537,13 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	_, err := m.store.Save(ctx, auth)
 	return err
+}
+
+// poolPolicyManaged distinguishes a routing pause from revoking a credential.
+func poolPolicyManaged(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	mode, _ := auth.Metadata["pool_mode"].(string)
+	return mode == "auto" || mode == "on" || mode == "off"
 }

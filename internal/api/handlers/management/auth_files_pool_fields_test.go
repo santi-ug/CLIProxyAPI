@@ -221,3 +221,45 @@ func TestPatchAuthFileFieldsPoolAndPriorityKeepRuntimeState(t *testing.T) {
 		t.Fatalf("bound session moved to %s after patch, want a.json", got)
 	}
 }
+
+func TestPoolStatusRejectsStaleRouterAndKeepsCooldown(t *testing.T) {
+	manager, dir := newPoolTestManager(t, nil, map[string]map[string]any{"guard.json": {"pool_mode": "auto"}})
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: dir}, manager)
+	patch := func(body string, fields bool) int {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest("PATCH", "/v8/management/auth-files/status", strings.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		if fields {
+			h.PatchAuthFileFields(c)
+		} else {
+			h.PatchAuthFileStatus(c)
+		}
+		return rec.Code
+	}
+	manager.MarkResult(context.Background(), coreauth.Result{AuthID: "guard.json", Provider: "codex", Model: poolTestModel, Error: &coreauth.Error{HTTPStatus: 429, Message: "quota"}})
+	before, _ := manager.GetByID("guard.json")
+	if got := patch(`{"name":"guard.json","pool_mode":"off"}`, true); got != 200 {
+		t.Fatalf("off metadata=%d", got)
+	}
+	if got := patch(`{"name":"guard.json","disabled":true,"expected_pool_mode":"off"}`, false); got != 200 {
+		t.Fatalf("disable=%d", got)
+	}
+	if got := patch(`{"name":"guard.json","disabled":false,"expected_pool_mode":"auto"}`, false); got != 409 {
+		t.Fatalf("stale router=%d", got)
+	}
+	after, _ := manager.GetByID("guard.json")
+	if !after.Disabled || after.Metadata["pool_mode"] != "off" {
+		t.Fatal("stale router overrode user Off")
+	}
+	if !after.Quota.Exceeded || !after.NextRetryAfter.Equal(before.NextRetryAfter) {
+		t.Fatal("pause erased quota cooldown")
+	}
+	if got := patch(`{"name":"guard.json","disabled":false,"expected_pool_mode":"off"}`, false); got != 200 {
+		t.Fatalf("enable=%d", got)
+	}
+	after, _ = manager.GetByID("guard.json")
+	if !after.Quota.Exceeded || !after.NextRetryAfter.Equal(before.NextRetryAfter) {
+		t.Fatal("resume erased quota cooldown")
+	}
+}

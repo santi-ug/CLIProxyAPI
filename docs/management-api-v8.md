@@ -177,3 +177,9 @@ accepts legacy, new, or mixed layouts, normalizing v8 documents on save.
 
 Plugin OAuth uses the shared v8 login endpoint. Other plugin-defined HTTP
 extensions retain their declared `/v0/management` routes.
+
+## Pool status changes
+
+A router may send `expected_pool_mode` with a status PATCH. Its value must be `auto`, `on`, or `off`. Missing stored mode means `auto`. The handler checks this value while serializing status and metadata mutations. A changed mode returns HTTP 409 without mutating the credential, so a stale router cannot undo a user's Off selection.
+
+A credential with pool metadata keeps its quota and cooldown state when paused and resumed. Routing pauses do not erase upstream quota limits. Persisted cooldown records also survive restarting while the pool credential is paused.
