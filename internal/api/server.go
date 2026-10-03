@@ -82,7 +82,9 @@ type Server struct {
 	wsAuthEnabled atomic.Bool
 
 	// trustLoopback mirrors cfg.TrustLoopback: loopback TCP peers skip API key checks.
-	trustLoopback atomic.Bool
+	trustLoopback           atomic.Bool
+	redisTrustMu            sync.Mutex
+	redisTrustedConnections map[net.Conn]struct{}
 
 	// management handler
 	mgmt *managementHandlers.Handler

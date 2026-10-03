@@ -41,6 +41,7 @@ func newTrustLoopbackTestServer(t *testing.T, trust bool) *Server {
 func serveFromPeer(server *Server, method, path, remoteAddr string, header http.Header) int {
 	req := httptest.NewRequest(method, path, nil)
 	req.RemoteAddr = remoteAddr
+	req.Host = "localhost"
 	for key, values := range header {
 		for _, value := range values {
 			req.Header.Add(key, value)
@@ -200,4 +201,63 @@ func TestTrustLoopbackRedisSkipsAuthForLoopbackPeer(t *testing.T) {
 	if string(item) != "a" {
 		t.Fatalf("RPOP item = %q, want %q", item, "a")
 	}
+}
+
+func TestTrustLoopbackRejectsBrowserAndRebinding(t *testing.T) {
+	server := newTrustLoopbackTestServer(t, true)
+	for _, path := range []string{"/v1/models", "/v0/management/config", "/v8/management/credentials", "/v1/ws", "/v1/responses"} {
+		for _, attack := range []string{"origin", "host"} {
+			req := httptest.NewRequest("GET", path, nil)
+			req.RemoteAddr = "127.0.0.1:1234"
+			req.Host = "localhost"
+			if attack == "origin" {
+				req.Header.Set("Origin", "https://evil.test")
+			} else {
+				req.Host = "evil.test"
+			}
+			rr := httptest.NewRecorder()
+			server.engine.ServeHTTP(rr, req)
+			if rr.Code < 400 {
+				t.Fatalf("%s %s bypassed authentication: %d", path, attack, rr.Code)
+			}
+			if strings.Contains(path, "management") && rr.Header().Get("Access-Control-Allow-Origin") != "" {
+				t.Fatal("management exposed cross-origin response")
+			}
+		}
+	}
+}
+
+func TestTrustLoopbackRedisReloadRevokesSubscription(t *testing.T) {
+	server := newTrustLoopbackTestServer(t, true)
+	addr, stop := startRedisMuxListener(t, server)
+	defer stop()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := writeTestRESPCommand(conn, "SUBSCRIBE", "usage"); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	// Read the subscription acknowledgement before revoking trust.
+	for i := 0; i < 6; i++ {
+		if _, err := reader.ReadString('\n'); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next := *server.cfg
+	next.TrustLoopback = false
+	server.UpdateClients(&next)
+	// A queued usage event may already be buffered when the socket closes.
+	for i := 0; i < 65536; i++ {
+		if _, err := reader.ReadByte(); err != nil {
+			if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+				t.Fatal("subscription was not closed")
+			}
+			return
+		}
+	}
+	t.Fatal("subscription kept sending after revocation")
 }

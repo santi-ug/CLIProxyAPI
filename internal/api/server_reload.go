@@ -177,7 +177,15 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		}
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	// Close keyless Redis sockets, including active subscriptions, when trust is revoked.
+	s.redisTrustMu.Lock()
 	s.trustLoopback.Store(cfg.TrustLoopback)
+	if !cfg.TrustLoopback {
+		for conn := range s.redisTrustedConnections {
+			_ = conn.Close()
+		}
+	}
+	s.redisTrustMu.Unlock()
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}

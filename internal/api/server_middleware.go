@@ -132,7 +132,10 @@ func isExampleAPIKeySafeModeProxyPath(path string) bool {
 //   - gin.HandlerFunc: The CORS middleware handler
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
+		// Management responses contain credentials and never opt into cross-origin reads.
+		if !strings.HasPrefix(c.Request.URL.Path, "/v0/management") && !strings.HasPrefix(c.Request.URL.Path, "/v8/management") {
+			c.Header("Access-Control-Allow-Origin", "*")
+		}
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "*")
 		c.Header("Access-Control-Expose-Headers", corsExposedResponseHeadersJoined)
@@ -164,7 +167,9 @@ func (s *Server) realtimeStandardAuthMiddleware() gin.HandlerFunc {
 
 // trustsLoopbackPeer reports whether trust-loopback is on and the request's TCP peer is loopback.
 func (s *Server) trustsLoopbackPeer(r *http.Request) bool {
-	return s.trustLoopback.Load() && access.IsLoopbackPeer(r)
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.trustLoopback.Load() && s.cfg != nil && access.IsTrustedLoopbackRequest(r, s.cfg.TrustLoopbackHosts)
 }
 
 // accessAuthMiddleware authenticates with the access manager. When trusted reports true for a

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	log "github.com/sirupsen/logrus"
 )
@@ -43,7 +44,20 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 
 	clientIP, localClient := resolveRemoteIP(conn.RemoteAddr())
 	// trust-loopback treats a loopback socket peer as already authenticated.
-	authed := s.trustLoopback.Load() && localClient
+	s.redisTrustMu.Lock()
+	authed := s.trustLoopback.Load() && access.IsLoopbackAddress(conn.RemoteAddr().String())
+	if authed {
+		if s.redisTrustedConnections == nil {
+			s.redisTrustedConnections = make(map[net.Conn]struct{})
+		}
+		s.redisTrustedConnections[conn] = struct{}{}
+	}
+	s.redisTrustMu.Unlock()
+	defer func() {
+		s.redisTrustMu.Lock()
+		delete(s.redisTrustedConnections, conn)
+		s.redisTrustMu.Unlock()
+	}()
 	writer := bufio.NewWriter(conn)
 	defer func() {
 		if errClose := conn.Close(); errClose != nil {

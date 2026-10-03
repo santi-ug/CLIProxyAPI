@@ -272,7 +272,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 		c.Header("X-CPA-SUPPORT-PLUGIN", pluginhost.SupportPluginHeaderValue())
 
-		if cfg := h.cfg; cfg != nil && cfg.TrustLoopback && access.IsLoopbackPeer(c.Request) {
+		if cfg := h.cfg; cfg != nil && cfg.TrustLoopback && access.IsTrustedLoopbackRequest(c.Request, cfg.TrustLoopbackHosts) {
 			c.Next()
 			return
 		}
