@@ -76,7 +76,8 @@ type SDKConfig struct {
 
 // ClientConfig configures client-facing compatibility behavior.
 type ClientConfig struct {
-	Codex CodexClientConfig `yaml:"codex" json:"codex"`
+	Claude ClaudeClientConfig `yaml:"claude" json:"claude"`
+	Codex  CodexClientConfig  `yaml:"codex" json:"codex"`
 }
 
 // CodexClientConfig configures Codex client compatibility and the model catalog.
@@ -107,4 +108,10 @@ type StreamingConfig struct {
 	// to allow auth rotation / transient recovery.
 	// <= 0 disables bootstrap retries. Default is 0.
 	BootstrapRetries int `yaml:"bootstrap-retries,omitempty" json:"bootstrap-retries,omitempty"`
+}
+
+// ClaudeClientConfig configures Claude request cache policy.
+type ClaudeClientConfig struct {
+	// CacheTTL accepts "5m" to force the standard cache pool; empty preserves client TTLs.
+	CacheTTL string `yaml:"cache-ttl" json:"cache-ttl"`
 }

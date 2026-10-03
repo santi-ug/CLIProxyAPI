@@ -289,6 +289,10 @@ requests:
 
 # Client-facing compatibility settings apply to both OAuth and API-key routes.
 client:
+  claude:
+    # "5m" forces the standard five-minute cache pool, including native Claude Code.
+    # Empty preserves the caller's cache TTLs. Applies on config reload.
+    cache-ttl: ""
   codex:
     # When false (default), only models that natively declare freeform apply_patch advertise it.
     # When true, non-template and bridged models supported by every routing executor also advertise "freeform".

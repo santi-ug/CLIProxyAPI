@@ -18,6 +18,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		return changes
 	}
 
+	if oldCfg.Client.Claude.CacheTTL != newCfg.Client.Claude.CacheTTL {
+		changes = append(changes, fmt.Sprintf("client.claude.cache-ttl: %q -> %q", oldCfg.Client.Claude.CacheTTL, newCfg.Client.Claude.CacheTTL))
+	}
 	// Simple scalars
 	if oldCfg.Client.Codex.EnableApplyPatch != newCfg.Client.Codex.EnableApplyPatch {
 		changes = append(changes, fmt.Sprintf("client.codex.enable-apply-patch: %t -> %t", oldCfg.Client.Codex.EnableApplyPatch, newCfg.Client.Codex.EnableApplyPatch))

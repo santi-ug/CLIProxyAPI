@@ -2247,3 +2247,16 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 
 	return body
 }
+
+// applyClaudeCacheTTL forces the standard five-minute pool after client and proxy TTL placement.
+// An absent TTL means five minutes on the Anthropic wire. Empty config preserves native TTLs.
+func applyClaudeCacheTTL(payload []byte, cfg *config.Config) []byte {
+	if cfg == nil || cfg.Client.Claude.CacheTTL != "5m" {
+		return payload
+	}
+	payload = stripClaudeCacheControlTTL(payload)
+	if updated, err := sjson.DeleteBytes(payload, "cache_control.ttl"); err == nil {
+		payload = updated
+	}
+	return payload
+}
