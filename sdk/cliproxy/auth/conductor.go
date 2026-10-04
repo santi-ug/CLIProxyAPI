@@ -207,6 +207,9 @@ type Manager struct {
 	refreshLocks sync.Map
 	// persistLocks serializes disk persistence per auth ID and guards against out-of-order writes.
 	persistLocks sync.Map
+
+	// activeRequests counts upstream requests currently executing per credential.
+	activeRequests activeRequestCounter
 }
 
 // NewManager constructs a manager with optional custom selector and hook.

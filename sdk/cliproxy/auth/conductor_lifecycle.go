@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -97,7 +98,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.UpdatedAt = now
 	cooldownStateChanged := normalizeModelStates(auth)
-	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
+	if m.cooldownDisabledForAuth(auth) || ((auth.Disabled || auth.Status == StatusDisabled) && !poolPolicyManaged(auth)) {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	}
 	auth.EnsureIndex()
@@ -148,26 +149,33 @@ const (
 	updateModeReplace updateAuthMode = iota
 	updateModeRefresh
 	updateModePrepare
+	updateModeManaged
 )
 
 // UpdatePreparedAuth atomically merges request preparation results into the latest runtime auth
 // under the manager lock, preserving concurrent modifications without modifying refresh lifecycle fields.
 func (m *Manager) UpdatePreparedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
-	return m.updateInternal(ctx, base, updated, updateModePrepare)
+	return m.updateInternal(ctx, base, updated, updateModePrepare, nil)
 }
 
 // UpdateRefreshedAuth atomically merges refresh results into the latest runtime auth
 // under the manager lock, preserving concurrent modifications (proxy_url, notes, weights, etc.).
 func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
-	return m.updateInternal(ctx, base, updated, updateModeRefresh)
+	return m.updateInternal(ctx, base, updated, updateModeRefresh, nil)
 }
 
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
-	return m.updateInternal(ctx, nil, auth, updateModeReplace)
+	return m.updateInternal(ctx, nil, auth, updateModeReplace, nil)
 }
 
-func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode) (*Auth, error) {
+// UpdateManagedAuth checks and mutates the latest auth under the manager lock.
+// The callback must not call manager methods. Persistence succeeds before publication.
+func (m *Manager) UpdateManagedAuth(ctx context.Context, id string, mutate func(*Auth) error) (*Auth, error) {
+	return m.updateInternal(ctx, nil, &Auth{ID: id}, updateModeManaged, mutate)
+}
+
+func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode, mutate func(*Auth) error) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
@@ -180,6 +188,39 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if !ok || existing == nil {
 		m.mu.Unlock()
 		return nil, nil
+	}
+	if mode == updateModeManaged {
+		auth = existing.Clone()
+		auth.Metadata = cloneManagedMetadata(existing.Metadata)
+		if mutate != nil {
+			if errMutate := mutate(auth); errMutate != nil {
+				m.mu.Unlock()
+				return nil, errMutate
+			}
+		}
+		NormalizeCredentialMetadata(auth.Metadata)
+		if poolMetadataString(auth, "pool_mode") == "on" && poolMetadataString(auth, "pool_role") == "reserve" {
+			// Keep manual On behind every configured primary, even if its
+			// priority is lower than the router's usual primary tier of 100.
+			priority := 50
+			for _, primary := range m.auths {
+				if primary == nil || primary.ID == auth.ID || primary.Disabled || primary.Status == StatusDisabled || poolMetadataString(primary, "pool_mode") == "off" || executorKeyFromAuth(primary) != executorKeyFromAuth(auth) || poolMetadataString(primary, "pool_role") != "primary" {
+					continue
+				}
+				if p := authPriority(primary); p <= priority {
+					priority = p - 1
+				}
+			}
+			auth.Metadata["priority"] = priority
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string)
+			}
+			auth.Attributes["priority"] = strconv.Itoa(priority)
+		}
+		if errWeight := ValidateAuthWeight(auth); errWeight != nil {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("update auth: %w", errWeight)
+		}
 	}
 	if m.authEpochs == nil {
 		m.authEpochs = make(map[string]uint64)
@@ -226,12 +267,47 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		auth.Generation++
 	}
 	cooldownStateChanged := false
-	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-			auth.ModelStates = existing.ModelStates
+	if poolPolicyManaged(auth) && !CredentialsChanged(existing, auth) {
+		if auth.Disabled || existing.Disabled {
+			auth.Unavailable = existing.Unavailable
+			auth.NextRetryAfter = existing.NextRetryAfter
+			auth.Quota = existing.Quota
+			auth.LastError = cloneError(existing.LastError)
+			if len(auth.ModelStates) == 0 {
+				auth.ModelStates = existing.Clone().ModelStates
+			}
 		}
+	}
+	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
+		// An auth re-read from disk (e.g. the file watcher echoing a management PATCH) carries
+		// no runtime state. Keep the live cooldown, quota and status so metadata-only edits do
+		// not make a cooling credential look healthy. Credential changes are handled below;
+		// refresh and prepare modes already merged the live state above.
 		credChanged := CredentialsChanged(existing, auth)
+		if mode == updateModeReplace && !credChanged && !hasCredentialRuntimeState(auth) {
+			inheritCredentialRuntimeState(auth, existing)
+		}
+		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+			auth.ModelStates = existing.Clone().ModelStates
+		}
 		if credChanged {
+			if mode == updateModeReplace {
+				// Re-login replaces the credentials that caused non-quota failures. Keep quota
+				// cooldowns, but do not carry terminal or request errors into the new login.
+				if !auth.Quota.Exceeded {
+					auth.Unavailable = false
+					auth.NextRetryAfter = time.Time{}
+					auth.LastError = nil
+					auth.StatusMessage = ""
+					auth.Status = StatusActive
+				}
+				for _, state := range auth.ModelStates {
+					if state != nil && !state.Quota.Exceeded {
+						resetModelState(state, time.Now())
+						cooldownStateChanged = true
+					}
+				}
+			}
 			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
 				auth.Unavailable = false
 				auth.LastError = nil
@@ -255,7 +331,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	now := time.Now()
 	auth.UpdatedAt = now
 	cooldownStateChanged = normalizeModelStates(auth) || cooldownStateChanged
-	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
+	if m.cooldownDisabledForAuth(auth) || ((auth.Disabled || auth.Status == StatusDisabled) && !poolPolicyManaged(auth)) {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	}
 	auth.EnsureIndex()
@@ -263,10 +339,11 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	// Keep the epoch check, save and installation together so a concurrent reload
 	// or removal cannot let an obsolete mint overwrite the credential on disk.
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
-	if persistMetaMint {
+	persistBeforePublish := persistMetaMint || mode == updateModeManaged
+	if persistBeforePublish {
 		if errPersist := m.persist(ctx, auth); errPersist != nil {
 			m.mu.Unlock()
-			return nil, fmt.Errorf("persist meta auth: %w", errPersist)
+			return nil, fmt.Errorf("persist auth: %w", errPersist)
 		}
 	}
 	authClone := auth.Clone()
@@ -285,7 +362,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(auth.ID)
-	if !persistMetaMint {
+	if !persistBeforePublish {
 		// Persist failures stay non-fatal, but must not be silent: after a token
 		// refresh the rotated credentials only exist in memory until persisted.
 		if errPersist := m.persist(ctx, auth); errPersist != nil {
@@ -297,6 +374,52 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		m.persistCooldownStates(context.Background())
 	}
 	return auth.Clone(), nil
+}
+
+// Metadata patches can edit nested JSON maps. Keep a rejected mutation from
+// changing the published auth through Auth.Clone's shallow metadata values.
+func cloneManagedMetadata(metadata map[string]any) map[string]any {
+	if metadata == nil {
+		return nil
+	}
+	clone := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		clone[key] = cloneManagedMetadataValue(value)
+	}
+	return clone
+}
+
+func cloneManagedMetadataValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneManagedMetadata(typed)
+	case []any:
+		clone := make([]any, len(typed))
+		for index, item := range typed {
+			clone[index] = cloneManagedMetadataValue(item)
+		}
+		return clone
+	default:
+		return value
+	}
+}
+
+// hasCredentialRuntimeState reports whether auth carries credential-level cooldown, quota or
+// error state of its own. Auths synthesized from disk or config never do.
+func hasCredentialRuntimeState(auth *Auth) bool {
+	return (auth.Status != "" && auth.Status != StatusActive) || auth.Unavailable || !auth.NextRetryAfter.IsZero() ||
+		auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() || auth.LastError != nil
+}
+
+// inheritCredentialRuntimeState copies the live credential-level status, cooldown and quota
+// from existing into auth. Per-model states are inherited separately.
+func inheritCredentialRuntimeState(auth, existing *Auth) {
+	auth.Status = existing.Status
+	auth.StatusMessage = existing.StatusMessage
+	auth.Unavailable = existing.Unavailable
+	auth.NextRetryAfter = existing.NextRetryAfter
+	auth.Quota = existing.Quota
+	auth.LastError = cloneError(existing.LastError)
 }
 
 // Remove deletes an auth from runtime state without persisting.
@@ -486,4 +609,19 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	_, err := m.store.Save(ctx, auth)
 	return err
+}
+
+// poolPolicyManaged distinguishes a routing pause from revoking a credential.
+func poolPolicyManaged(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	mode, _ := auth.Metadata["pool_mode"].(string)
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "auto" || mode == "on" || mode == "off" {
+		return true
+	}
+	_, hasLabel := auth.Metadata["pool_label"]
+	_, hasState := auth.Metadata["pool_state"]
+	return mode == "" && (hasLabel || hasState)
 }

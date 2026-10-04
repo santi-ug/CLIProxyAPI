@@ -120,6 +120,17 @@ retain the corresponding business operation's fields.
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
 
+## Credential list fields
+
+Each entry returned by `GET /credentials` (and v0 `GET /auth-files`) also includes:
+
+- `active_requests`: upstream requests currently executing on the credential.
+  Streams and WebSocket turns count until they end.
+- Every top-level metadata key that starts with `pool_` and holds a string, number,
+  or boolean, under the same name. External routing tools set these through
+  `PATCH /credentials/fields`, for example `{"name": "codex-a.json", "pool_mode": "off", "priority": 2}`.
+  Metadata-only edits keep the credential's cooldown, quota, and session bindings.
+
 ## OAuth
 
 The login URL is shared by all providers. Set the required `provider` query
@@ -166,3 +177,9 @@ accepts legacy, new, or mixed layouts, normalizing v8 documents on save.
 
 Plugin OAuth uses the shared v8 login endpoint. Other plugin-defined HTTP
 extensions retain their declared `/v0/management` routes.
+
+## Pool status changes
+
+A router may send `expected_pool_mode` with a status PATCH. Its value must be `auto`, `on`, or `off`. Missing stored mode means `auto`. The handler checks this value while serializing status and metadata mutations. A changed mode returns HTTP 409 without mutating the credential, so a stale router cannot undo a user's Off selection.
+
+A credential with pool metadata keeps its quota and cooldown state when paused and resumed. Routing pauses do not erase upstream quota limits. Persisted cooldown records also survive restarting while the pool credential is paused.

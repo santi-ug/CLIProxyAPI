@@ -278,7 +278,7 @@ func (m *Manager) clearDisabledCooldownStates(cfg *internalconfig.Config) bool {
 		if auth == nil {
 			continue
 		}
-		if !quotaCooldownDisabledForAuthWithConfig(auth, cfg) && !auth.Disabled && auth.Status != StatusDisabled {
+		if !quotaCooldownDisabledForAuthWithConfig(auth, cfg) && (!(auth.Disabled || auth.Status == StatusDisabled) || poolPolicyManaged(auth)) {
 			continue
 		}
 		if clearCooldownStateForAuth(auth, now) {
@@ -357,7 +357,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		return false
 	}
 	auth := m.auths[authID]
-	if auth == nil || auth.Disabled || auth.Status == StatusDisabled || m.cooldownDisabledForAuth(auth) || hasUnauthorizedAuthFailure(auth) {
+	if auth == nil || ((auth.Disabled || auth.Status == StatusDisabled) && !poolPolicyManaged(auth)) || m.cooldownDisabledForAuth(auth) || hasUnauthorizedAuthFailure(auth) {
 		return false
 	}
 	updatedAt := record.UpdatedAt
@@ -373,7 +373,9 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 
 	if model == "" {
 		auth.Unavailable = true
-		auth.Status = StatusError
+		if !auth.Disabled {
+			auth.Status = StatusError
+		}
 		auth.NextRetryAfter = record.NextRetryAfter
 		applyCooldownFields(&auth.Quota, quota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, quota)
@@ -628,7 +630,7 @@ func (m *Manager) cooldownStateRecordsSnapshot() []CooldownStateRecord {
 }
 
 func (m *Manager) cooldownStateRecordsForAuthLocked(auth *Auth, now time.Time) []CooldownStateRecord {
-	if auth == nil || auth.ID == "" || auth.Disabled || auth.Status == StatusDisabled || m.cooldownDisabledForAuth(auth) {
+	if auth == nil || auth.ID == "" || ((auth.Disabled || auth.Status == StatusDisabled) && !poolPolicyManaged(auth)) || m.cooldownDisabledForAuth(auth) {
 		return nil
 	}
 	records := make([]CooldownStateRecord, 0, 1+len(auth.ModelStates))
@@ -760,6 +762,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 	}
+	recordPoolAttemptResult(ctx, result)
 	modelKey := canonicalModelKey(result.Model)
 
 	var authSnapshot *Auth

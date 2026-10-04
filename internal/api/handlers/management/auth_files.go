@@ -784,7 +784,30 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 	if requestRetry, ok := auth.RequestRetryOverride(); ok {
 		entry["request_retry"] = requestRetry
 	}
+	for key, value := range poolMetadataFields(auth.Metadata) {
+		entry[key] = value
+	}
+	entry["active_requests"] = h.authManager.ActiveRequests(auth.ID)
 	return entry
+}
+
+// poolMetadataFields returns the top-level pool_* metadata keys with scalar values.
+// External routing tools own these keys; objects, arrays and nulls are skipped.
+func poolMetadataFields(metadata map[string]any) map[string]any {
+	var fields map[string]any
+	for key, value := range metadata {
+		if !strings.HasPrefix(key, "pool_") {
+			continue
+		}
+		switch value.(type) {
+		case string, bool, json.Number, float64, float32, int, int32, int64:
+			if fields == nil {
+				fields = make(map[string]any)
+			}
+			fields[key] = value
+		}
+	}
+	return fields
 }
 
 func authFileRequestRetryFromJSON(data []byte) (int, bool) {
