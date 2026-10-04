@@ -81,6 +81,11 @@ type Server struct {
 	wsAuthChanged func(bool, bool)
 	wsAuthEnabled atomic.Bool
 
+	// trustLoopback mirrors cfg.TrustLoopback: loopback TCP peers skip API key checks.
+	trustLoopback           atomic.Bool
+	redisTrustMu            sync.Mutex
+	redisTrustedConnections map[net.Conn]struct{}
+
 	// management handler
 	mgmt *managementHandlers.Handler
 
@@ -192,6 +197,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	s.trustLoopback.Store(cfg.TrustLoopback)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	s.handlers.SetPluginHost(optionState.pluginHost)
 	if optionState.pluginHost != nil {
@@ -239,8 +245,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	// Register management routes when configuration or environment secrets are available,
-	// or when a local management password is provided (e.g. TUI mode).
-	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || s.localPassword != ""
+	// when a local management password is provided (e.g. TUI mode), or when trust-loopback
+	// lets local callers in without a key.
+	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || s.localPassword != "" || cfg.TrustLoopback
 	s.managementRoutesEnabled.Store(hasManagementSecret)
 	redisqueue.SetEnabled(hasManagementSecret || (cfg != nil && cfg.Home.Enabled))
 	if hasManagementSecret {

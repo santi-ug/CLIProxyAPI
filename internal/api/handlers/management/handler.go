@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
@@ -235,7 +236,11 @@ func (h *Handler) reloadConfigAfterManagementSaveAsync(ctx context.Context, snap
 }
 
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
-func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
+func (h *Handler) SetLocalPassword(password string) {
+	h.mu.Lock()
+	h.localPassword = password
+	h.mu.Unlock()
+}
 
 // SetLogDirectory updates the directory where main.log should be looked up.
 func (h *Handler) SetLogDirectory(dir string) {
@@ -263,12 +268,25 @@ func (h *Handler) SetPostAuthPersistHook(hook coreauth.PostAuthHook) {
 // Middleware enforces access control for management endpoints.
 // All requests (local and remote) require a valid management key.
 // Additionally, remote access requires allow-remote-management=true.
+// With trust-loopback on, a loopback TCP peer skips the key check entirely.
 func (h *Handler) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("X-CPA-VERSION", buildinfo.Version)
 		c.Header("X-CPA-COMMIT", buildinfo.Commit)
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 		c.Header("X-CPA-SUPPORT-PLUGIN", pluginhost.SupportPluginHeaderValue())
+
+		h.mu.Lock()
+		trustLoopback := h.cfg != nil && h.cfg.TrustLoopback
+		var loopbackHosts []string
+		if h.cfg != nil {
+			loopbackHosts = append([]string(nil), h.cfg.TrustLoopbackHosts...)
+		}
+		h.mu.Unlock()
+		if trustLoopback && access.IsTrustedLoopbackRequest(c.Request, loopbackHosts) {
+			c.Next()
+			return
+		}
 
 		clientIP := c.ClientIP()
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
@@ -306,6 +324,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return false, http.StatusForbidden, "remote management disabled"
 	}
 
+	h.mu.Lock()
 	cfg := h.cfg
 	var (
 		allowRemote bool
@@ -319,6 +338,8 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		allowRemote = true
 	}
 	envSecret := h.envSecret
+	localPassword := h.localPassword
+	h.mu.Unlock()
 
 	now := time.Now()
 	h.attemptsMu.Lock()
@@ -374,7 +395,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	}
 
 	if localClient {
-		if lp := h.localPassword; lp != "" {
+		if lp := localPassword; lp != "" {
 			if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
 				reset()
 				return true, 0, ""

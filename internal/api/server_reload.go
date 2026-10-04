@@ -126,11 +126,12 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		util.SetLogLevel(cfg)
 	}
 
+	// trust-loopback counts as a secret here: it keeps management routes up for local callers.
 	prevSecretEmpty := true
 	if oldCfg != nil {
-		prevSecretEmpty = oldCfg.RemoteManagement.SecretKey == ""
+		prevSecretEmpty = oldCfg.RemoteManagement.SecretKey == "" && !oldCfg.TrustLoopback
 	}
-	newSecretEmpty := cfg.RemoteManagement.SecretKey == ""
+	newSecretEmpty := cfg.RemoteManagement.SecretKey == "" && !cfg.TrustLoopback
 	if s.envManagementSecret {
 		s.registerManagementRoutes()
 		if s.managementRoutesEnabled.CompareAndSwap(false, true) {
@@ -176,6 +177,15 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		}
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	// Close keyless Redis sockets, including active subscriptions, when trust is revoked.
+	s.redisTrustMu.Lock()
+	s.trustLoopback.Store(cfg.TrustLoopback)
+	if !cfg.TrustLoopback {
+		for conn := range s.redisTrustedConnections {
+			_ = conn.Close()
+		}
+	}
+	s.redisTrustMu.Unlock()
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}

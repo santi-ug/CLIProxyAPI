@@ -12,6 +12,11 @@ Send `Authorization: Bearer <management-key>` or `X-Management-Key: <management-
 OAuth callbacks validate a pending login state and do not require a management-key
 header. Home mode disables local management endpoints for both versions.
 
+With `server.trust-loopback: true`, requests whose TCP peer is loopback skip the
+management key and the API keys, even when no secret key is set. Forwarded IP
+headers are ignored, so a local reverse proxy such as Tailscale Serve becomes the
+only remote way in.
+
 ## Configuration endpoints
 
 All paths below are relative to `/v8/management`.

@@ -12,6 +12,11 @@ type Config struct {
 	Host string `yaml:"host" json:"-"`
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
+	// TrustLoopback permits keyless requests from a loopback socket with an allowed Host
+	// and no Origin or an exact same-origin Origin. Never expose it through a public tunnel.
+	TrustLoopback bool `yaml:"trust-loopback" json:"-"`
+	// TrustLoopbackHosts adds private proxy hostnames or exact host:port authorities.
+	TrustLoopbackHosts []string `yaml:"trust-loopback-hosts" json:"-"`
 
 	// TrustedProxies lists the IPs or CIDRs allowed to provide forwarded client IP headers.
 	// The server applies this list at startup; changing it requires a restart.
