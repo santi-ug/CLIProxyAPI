@@ -553,3 +553,13 @@ func headerContainsClaudeCodeBeta(headers http.Header) bool {
 	}
 	return false
 }
+
+// IsNativeClaudeCodeModelListRequest reports whether a body-less request such as
+// GET /v1/models carries native Claude Code's client identity: X-App: cli and a native
+// claude-cli User-Agent inside the configured version baseline. A listing has no body or
+// per-request betas, so the beta and metadata.user_id signals that DetectClaudeCodeRequest
+// requires for Messages calls do not apply here.
+func IsNativeClaudeCodeModelListRequest(headers http.Header, cfg *config.Config) bool {
+	detection := DetectClaudeCodeRequest(headers, nil, true, cfg)
+	return detection.XAppCLI && detection.UserAgent && detection.NativeClient
+}

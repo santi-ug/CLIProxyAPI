@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -73,8 +74,8 @@ func (s *Server) setupRoutes() {
 		v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)
 		v1.POST("/videos/extensions", openaiHandlers.XAIVideosExtensions)
 		v1.GET("/videos/:request_id", openaiHandlers.XAIVideosRetrieve)
-		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
-		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
+		v1.POST("/messages", s.markNativeClaudeCode(false), claudeCodeHandlers.ClaudeMessages)
+		v1.POST("/messages/count_tokens", s.markNativeClaudeCode(true), claudeCodeHandlers.ClaudeCountTokens)
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
@@ -538,6 +539,46 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	_, _ = c.Writer.Write(upstreamBody)
 }
 
+// markNativeClaudeCode tags a Messages request as native Claude Code when claude-code-only is
+// on and the request passes the same detection the Claude executor uses to skip cloaking.
+// Only tagged requests may be served by Claude subscription logins.
+func (s *Server) markNativeClaudeCode(countTokens bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !auth.ClaudeCodeOnlyEnabled() || c.Request == nil || c.Request.Body == nil {
+			c.Next()
+			return
+		}
+		body, errRead := io.ReadAll(c.Request.Body)
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
+		if errRead == nil && helps.DetectClaudeCodeRequest(c.Request.Header, body, countTokens, s.getConfig()).Confirmed {
+			auth.MarkNativeClaudeCode(c)
+		}
+		c.Next()
+	}
+}
+
+// withoutClaudeSubscriptionOnlyModelInfos drops models only Claude subscription logins serve
+// while claude-code-only is on.
+func (s *Server) withoutClaudeSubscriptionOnlyModelInfos(infos []*registry.ModelInfo) []*registry.ModelInfo {
+	if !auth.ClaudeCodeOnlyEnabled() || s == nil || s.handlers == nil || s.handlers.AuthManager == nil {
+		return infos
+	}
+	hidden := s.handlers.AuthManager.ClaudeSubscriptionOnlyModels()
+	if len(hidden) == 0 {
+		return infos
+	}
+	kept := make([]*registry.ModelInfo, 0, len(infos))
+	for _, info := range infos {
+		if info == nil {
+			continue
+		}
+		if _, hide := hidden[info.ID]; !hide {
+			kept = append(kept, info)
+		}
+	}
+	return kept
+}
+
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
 // The handler is served as-is without additional middleware beyond the standard stack already configured.
 func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
@@ -613,6 +654,9 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 
 		// Route to Claude handler for Anthropic API requests.
 		if isAnthropicModelsRequest(c) {
+			if auth.ClaudeCodeOnlyEnabled() && helps.IsNativeClaudeCodeModelListRequest(c.Request.Header, s.getConfig()) {
+				auth.MarkNativeClaudeCode(c)
+			}
 			claudeHandler.ClaudeModels(c)
 		} else {
 			openaiHandler.OpenAIModels(c)
@@ -660,7 +704,7 @@ func (s *Server) handleGrokModels(c *gin.Context) {
 		}
 		models = grokModelsFromHomeEntries(entries)
 	} else {
-		models = grokModelsFromRegistryInfos(registry.GetGlobalRegistry().GetAvailableModelInfos())
+		models = grokModelsFromRegistryInfos(s.withoutClaudeSubscriptionOnlyModelInfos(registry.GetGlobalRegistry().GetAvailableModelInfos()))
 	}
 	s.writeModelListResponse(c, "openai", grokbuild.BuildResponse(models))
 }

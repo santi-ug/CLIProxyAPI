@@ -10,8 +10,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"golang.org/x/net/context"
@@ -685,7 +687,54 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 	if c.Writer.Header().Get("Content-Type") == "" {
 		c.Header("Content-Type", "application/json; charset=utf-8")
 	}
+	body = h.filterClaudeSubscriptionModels(c, sourceFormat, body)
 	c.Set("API_RESPONSE", cloneBytes(body))
 	c.Status(http.StatusOK)
 	_, _ = c.Writer.Write(body)
+}
+
+// filterClaudeSubscriptionModels applies the same login policy to every model-list format.
+func (h *BaseAPIHandler) filterClaudeSubscriptionModels(c *gin.Context, sourceFormat string, body []byte) []byte {
+	if !coreauth.ClaudeCodeOnlyEnabled() || h.AuthManager == nil || (sourceFormat == "claude" && coreauth.IsNativeClaudeCode(c)) {
+		return body
+	}
+	hidden := h.AuthManager.ClaudeSubscriptionOnlyModels()
+	if len(hidden) == 0 {
+		return body
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(body, &object) != nil {
+		return body
+	}
+	changed := false
+	for _, field := range []string{"data", "models"} {
+		var models []map[string]json.RawMessage
+		if json.Unmarshal(object[field], &models) != nil {
+			continue
+		}
+		kept := make([]map[string]json.RawMessage, 0, len(models))
+		for _, model := range models {
+			var id string
+			for _, key := range []string{"id", "slug", "name"} {
+				if json.Unmarshal(model[key], &id) == nil && id != "" {
+					break
+				}
+			}
+			id = claudemodels.ResolveClaudeModelIDPrefix(strings.TrimPrefix(id, "models/"))
+			if _, blocked := hidden[id]; blocked {
+				changed = true
+				continue
+			}
+			kept = append(kept, model)
+		}
+		object[field], _ = json.Marshal(kept)
+	}
+	if !changed {
+		return body
+	}
+	filtered, err := json.Marshal(object)
+	if err != nil {
+		return body
+	}
+	return filtered
 }
