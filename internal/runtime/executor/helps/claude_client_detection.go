@@ -60,12 +60,14 @@ var claudeCodeSubclientByEntrypoint = map[string]string{
 	"claude-coworker-terminal":  "claude-coworker-terminal",
 }
 
-// Only product surfaces with verified 2.1.220 wire behavior are eligible for
-// pass-through. Other first-party-looking entrypoints are cloaked until their
+// Only product surfaces with verified wire behavior are eligible for
+// pass-through. sdk-ts was measured through T3's Claude Agent SDK integration.
+// Other first-party-looking entrypoints are cloaked until their
 // CPA-reachable request shape has been captured and reviewed.
 var nativeClaudeEntrypoints = map[string]bool{
 	"cli":           true,
 	"sdk-cli":       true,
+	"sdk-ts":        true,
 	"claude-vscode": true,
 }
 
@@ -133,8 +135,8 @@ type ClaudeCodeRequestDetection struct {
 // applies CPA's native-client policy. Standard Messages requests require all
 // four strong signals; count_tokens omits metadata.user_id. A separate narrow
 // profile recognizes measured native Haiku helper requests that intentionally
-// omit claude-code-20250219. Generic sdk-ts/sdk-py Agent SDK entrypoints remain
-// unconfirmed and receive CLI cloaking.
+// omit claude-code-20250219. The measured sdk-ts entrypoint requires an Agent SDK
+// version and all standard signals; other SDK entrypoints remain unconfirmed.
 func DetectClaudeCodeRequest(headers http.Header, payload []byte, countTokens bool, configs ...*config.Config) ClaudeCodeRequestDetection {
 	var cfg *config.Config
 	if len(configs) > 0 {
@@ -154,8 +156,11 @@ func DetectClaudeCodeRequest(headers http.Header, payload []byte, countTokens bo
 	metadataUserID := gjson.GetBytes(payload, "metadata.user_id")
 	detection.MetadataUserID = metadataUserID.Exists() && metadataUserID.Type == gjson.String && isValidUserID(metadataUserID.String())
 	detection.NativeClient = nativeClaudeEntrypoints[entrypoint]
+	if entrypoint == "sdk-ts" && agentSDKVersion == "" {
+		detection.NativeClient = false
+	}
 	standardSignals := detection.XAppCLI && detection.UserAgent && detection.BetasPresent && (countTokens || detection.MetadataUserID)
-	detection.HelperProfile = detection.NativeClient && matchesMeasuredClaudeCodeHelperProfile(headers, payload, countTokens, detection, cfg)
+	detection.HelperProfile = detection.NativeClient && entrypoint != "sdk-ts" && matchesMeasuredClaudeCodeHelperProfile(headers, payload, countTokens, detection, cfg)
 	detection.StrongSignals = standardSignals || detection.HelperProfile
 	detection.Confirmed = detection.StrongSignals && detection.NativeClient
 	return detection

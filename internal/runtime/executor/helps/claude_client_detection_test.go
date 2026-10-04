@@ -24,6 +24,38 @@ func confirmedClaudeCodeHeaders() http.Header {
 	}
 }
 
+func TestDetectClaudeCodeRequestRecognizesT3AgentSDK(t *testing.T) {
+	headers := confirmedClaudeCodeHeaders()
+	headers.Set("User-Agent", "claude-cli/2.1.288 (external, sdk-ts, agent-sdk/0.3.276)")
+	payload := claudeCodeDetectionPayload(validClaudeCodeMetadataUserID)
+	if got := DetectClaudeCodeRequest(headers, payload, false); !got.Confirmed {
+		t.Fatalf("T3 Agent SDK request rejected: %#v", got)
+	}
+	for _, missing := range []string{"X-App", "Anthropic-Beta", "metadata", "sdk-version"} {
+		t.Run(missing, func(t *testing.T) {
+			candidate := headers.Clone()
+			body := payload
+			switch missing {
+			case "metadata":
+				body = []byte(`{"messages":[]}`)
+			case "sdk-version":
+				candidate.Set("User-Agent", "claude-cli/2.1.288 (external, sdk-ts)")
+			default:
+				candidate.Del(missing)
+			}
+			if got := DetectClaudeCodeRequest(candidate, body, false); got.Confirmed {
+				t.Fatalf("incomplete SDK identity accepted: %#v", got)
+			}
+		})
+	}
+	// SDK requests must not inherit the CLI helper exception to the standard signals.
+	helperHeaders := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true))
+	helperHeaders.Set("User-Agent", headers.Get("User-Agent"))
+	if got := DetectClaudeCodeRequest(helperHeaders, measuredClaudeCodeMinimalHelperPayload(), false); got.Confirmed || got.HelperProfile {
+		t.Fatalf("SDK accepted through a CLI-only helper profile: %#v", got)
+	}
+}
+
 func measuredClaudeCodeHelperHeaders(betaProfile string) http.Header {
 	profile := defaultClaudeDeviceProfile(&config.Config{})
 	headers := http.Header{
@@ -144,7 +176,7 @@ func TestDetectClaudeCodeRequestClassifiesEntrypoints(t *testing.T) {
 		{name: "cli", userAgent: "claude-cli/2.1.280 (external, cli)", entrypoint: "cli", subclient: "claude-code-cli", native: true},
 		{name: "vscode-agent-sdk", userAgent: "claude-cli/2.1.280 (external, claude-vscode, agent-sdk/0.3.220)", entrypoint: "claude-vscode", subclient: "claude-code-vscode", agentSDKVersion: "0.3.220", native: true},
 		{name: "sdk-cli", userAgent: "claude-cli/2.1.280 (external, sdk-cli)", entrypoint: "sdk-cli", subclient: "claude-code-cli-sdk", native: true},
-		{name: "sdk-ts", userAgent: "claude-cli/2.1.280 (external, sdk-ts, agent-sdk/0.3.220)", entrypoint: "sdk-ts", subclient: "claude-code-sdk-ts", agentSDKVersion: "0.3.220"},
+		{name: "sdk-ts", userAgent: "claude-cli/2.1.280 (external, sdk-ts, agent-sdk/0.3.220)", entrypoint: "sdk-ts", subclient: "claude-code-sdk-ts", agentSDKVersion: "0.3.220", native: true},
 		{name: "sdk-py", userAgent: "claude-cli/2.1.280 (external, sdk-py, agent-sdk/0.1.0)", entrypoint: "sdk-py", subclient: "claude-code-sdk-py", agentSDKVersion: "0.1.0"},
 		{name: "desktop", userAgent: "claude-cli/2.1.280 (external, claude-desktop)", entrypoint: "claude-desktop", subclient: "claude-desktop"},
 		{name: "desktop-third-party-inference", userAgent: "claude-cli/2.1.280 (external, claude-desktop-3p)", entrypoint: "claude-desktop-3p", subclient: "claude-desktop-3p"},
