@@ -19,6 +19,7 @@ func TestClaudeCodeOnlyNativeMessagesMarker(t *testing.T) {
 	for _, userAgent := range []string{
 		"claude-cli/2.1.280 (external, cli)",
 		"claude-cli/2.1.288 (external, sdk-ts, agent-sdk/0.3.276)",
+		"claude-cli/2.1.314 (external, t3-code, agent-sdk/0.3.316)",
 	} {
 		for _, native := range []bool{false, true} {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
