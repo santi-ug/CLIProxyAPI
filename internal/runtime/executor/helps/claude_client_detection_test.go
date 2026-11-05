@@ -56,6 +56,37 @@ func TestDetectClaudeCodeRequestRecognizesT3AgentSDK(t *testing.T) {
 	}
 }
 
+func TestDetectClaudeCodeRequestRecognizesT3Entrypoint(t *testing.T) {
+	headers := confirmedClaudeCodeHeaders()
+	headers.Set("User-Agent", "claude-cli/2.1.314 (external, t3-code, agent-sdk/0.3.316)")
+	payload := claudeCodeDetectionPayload(validClaudeCodeMetadataUserID)
+	if got := DetectClaudeCodeRequest(headers, payload, false); !got.Confirmed || got.Subclient != "claude-code-t3" {
+		t.Fatalf("T3 Code request rejected or misclassified: %#v", got)
+	}
+	for _, missing := range []string{"X-App", "Anthropic-Beta", "metadata", "sdk-version"} {
+		t.Run(missing, func(t *testing.T) {
+			candidate := headers.Clone()
+			body := payload
+			switch missing {
+			case "metadata":
+				body = []byte(`{"messages":[]}`)
+			case "sdk-version":
+				candidate.Set("User-Agent", "claude-cli/2.1.314 (external, t3-code)")
+			default:
+				candidate.Del(missing)
+			}
+			if got := DetectClaudeCodeRequest(candidate, body, false); got.Confirmed {
+				t.Fatalf("incomplete T3 Code identity accepted: %#v", got)
+			}
+		})
+	}
+	helperHeaders := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true))
+	helperHeaders.Set("User-Agent", headers.Get("User-Agent"))
+	if got := DetectClaudeCodeRequest(helperHeaders, measuredClaudeCodeMinimalHelperPayload(), false); got.Confirmed || got.HelperProfile {
+		t.Fatalf("T3 Code accepted through a CLI-only helper profile: %#v", got)
+	}
+}
+
 func measuredClaudeCodeHelperHeaders(betaProfile string) http.Header {
 	profile := defaultClaudeDeviceProfile(&config.Config{})
 	headers := http.Header{

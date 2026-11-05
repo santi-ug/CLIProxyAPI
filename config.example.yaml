@@ -28,7 +28,7 @@ server:
   port: 8317
 
   # When true, Claude subscription logins (OAuth and file credentials) only serve verified native
-  # Claude Code, including its verified TypeScript Agent SDK used by T3, on the Anthropic Messages
+  # Claude Code, including T3's verified Agent SDK entrypoints (sdk-ts and t3-code), on the Anthropic Messages
   # API (/v1/messages and count_tokens). Every other client or
   # endpoint gets HTTP 403 instead of a disguised request, and model listings for those clients hide
   # models that only Claude logins serve. Claude API keys keep serving everyone.
